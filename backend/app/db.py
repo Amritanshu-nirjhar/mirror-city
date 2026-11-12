@@ -7,11 +7,19 @@ pool = ConnectionPool(os.environ["DATABASE_URL"], min_size=1, max_size=8, open=F
                       kwargs={"row_factory": dict_row, "autocommit": True})
 
 
+def _ensure_open():
+    # Serverless hosts (Vercel) do not run the ASGI lifespan, so the pool opens on first use.
+    if pool.closed:
+        pool.open(wait=True)
+
+
 def rows(sql, params=()):
+    _ensure_open()
     with pool.connection() as conn:
         return conn.execute(sql, params).fetchall()
 
 
 def row(sql, params=()):
+    _ensure_open()
     with pool.connection() as conn:
         return conn.execute(sql, params).fetchone()

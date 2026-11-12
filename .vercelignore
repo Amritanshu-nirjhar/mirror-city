@@ -1,0 +1,11 @@
+# Only the app goes to the function. The raw city data (417 MB zip) and the local database stay here.
+data/
+database/
+ingestion/
+docs/
+.venv/
+frontend/node_modules/
+frontend/public/cesium/
+backend/tests/
+*.log
+.env

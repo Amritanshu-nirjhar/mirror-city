@@ -26,7 +26,11 @@ from . import gsi
 from .db import row, rows
 
 router = APIRouter(prefix="/api")
-DATA = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parents[2] / "data"))
+ROOT = Path(__file__).resolve().parents[2]
+# Precomputed flood rasters ship with the code (read-only). New ones go to CACHE_DIR, which is
+# /tmp on Vercel because the deployed filesystem is read-only.
+SHIPPED = Path(__file__).resolve().parents[1] / "cache"
+CACHE = Path(os.environ.get("CACHE_DIR", ROOT / "data" / "cache"))
 
 Z, TILE = 14, 256  # the zoom the 3D view draws: about 8 m per pixel here
 # GSI's standard flood-depth legend, shallow to deep, and the top of each depth class in metres.
@@ -89,7 +93,8 @@ def flood(breach_id):
     x1, y1 = (int(v) for v in _tile_xy(g["lon"].max(), g["lat"].min()))
     w, h = x1 - x0 + 1, y1 - y0 + 1
     # The tile window is part of the name: a re-ingested, wider network must not reuse a smaller raster.
-    path = DATA / "cache" / f"flood_{breach_id}_{x0}_{y0}_{w}x{h}.npz"
+    name = f"flood_{breach_id}_{x0}_{y0}_{w}x{h}.npz"
+    path = next((p for p in (SHIPPED / name, CACHE / name) if p.exists()), CACHE / name)
     with _build:
         if not path.exists():
             first = np.full((h * TILE, w * TILE), NEVER, np.uint16)
@@ -106,7 +111,7 @@ def flood(breach_id):
                         win = np.s_[j * TILE:(j + 1) * TILE, i * TILE:(i + 1) * TILE]
                         first[win] = np.where((t >= IMPASSABLE) & (first[win] == NEVER), k, first[win])
                         deepest[win] = np.maximum(deepest[win], t)
-            path.parent.mkdir(exist_ok=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             np.savez_compressed(path, first=first, deepest=deepest, origin=[x0, y0], steps=s["time_steps"])
     d = np.load(path)
     return {"first": d["first"], "deepest": d["deepest"], "origin": d["origin"], "steps": d["steps"].astype(float),
