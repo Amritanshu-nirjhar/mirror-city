@@ -3,13 +3,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
+import psycopg
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import gsi, sims
-from .db import pool, row, rows
+from .db import DatabaseUnavailable, pool, row, rows
 
 
 @asynccontextmanager
@@ -46,6 +47,16 @@ LENGTH_NOTE = ("PLATEAU LOD1 roads are surface polygons, not centrelines. Length
                "polygon's area and perimeter; exposed length is that estimate scaled by the exposed share of area.")
 STATIC_NOTE = ("Static statistics from PLATEAU flood-risk polygons (river flooding, maximum assumed rainfall). "
                "They are independent of any GSI breach scenario.")
+
+
+@app.exception_handler(DatabaseUnavailable)
+def database_unavailable(_, exc):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(psycopg.OperationalError)
+def database_unreachable(_, exc):
+    return JSONResponse(status_code=503, content={"detail": "The database cannot be reached. Check DATABASE_URL and that the data is loaded."})
 
 
 @app.exception_handler(gsi.UpstreamError)

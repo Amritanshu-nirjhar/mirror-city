@@ -9,8 +9,14 @@ pool = ConnectionPool(os.environ.get("DATABASE_URL", "postgresql://unset"), min_
 
 def _ensure_open():
     # Serverless hosts (Vercel) do not run the ASGI lifespan, so the pool opens on first use.
+    if "DATABASE_URL" not in os.environ:
+        raise DatabaseUnavailable("DATABASE_URL is not set. Add a hosted PostGIS connection string in the project's environment variables.")
     if pool.closed:
         pool.open(wait=True)
+
+
+class DatabaseUnavailable(Exception):
+    pass
 
 
 def rows(sql, params=()):
