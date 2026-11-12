@@ -20,7 +20,7 @@ from shapely.geometry import MultiPolygon, box
 from . import ingest_citygml as m
 from .discover_plateau import AOI, CITY, DATA, YEAR
 
-# The frontend draws water on 4 x 4 z14 tiles (about 8 km) centred on the AOI. This margin
+# The 3D view draws water on 4 x 4 z14 tiles (about 8 km) centred on the AOI. This margin
 # covers that square for the default AOI; the source files end at the 2nd-level mesh edge.
 MARGIN = 0.04  # degrees
 DISPLAY = box(AOI[0] - MARGIN, AOI[1] - MARGIN, AOI[2] + MARGIN, AOI[3] + MARGIN)

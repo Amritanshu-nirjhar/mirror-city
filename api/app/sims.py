@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api")
 ROOT = Path(__file__).resolve().parents[2]
 # Precomputed flood rasters ship with the code (read-only). New ones go to CACHE_DIR, which is
 # /tmp on Vercel because the deployed filesystem is read-only.
-SHIPPED = Path(__file__).resolve().parents[1] / "cache"
+SHIPPED = Path(__file__).resolve().parents[1] / "cache"  # api/cache
 CACHE = Path(os.environ.get("CACHE_DIR", ROOT / "data" / "cache"))
 
 Z, TILE = 14, 256  # the zoom the 3D view draws: about 8 m per pixel here

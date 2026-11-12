@@ -4,8 +4,7 @@ database/
 ingestion/
 docs/
 .venv/
-frontend/node_modules/
-frontend/public/cesium/
-backend/tests/
+node_modules/
+public/cesium/
 *.log
 .env

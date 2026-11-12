@@ -257,6 +257,6 @@ def flood_depth(breach_id: str, lon: Lon, lat: Lat, minutes: Annotated[int | Non
 
 
 # Serve the built frontend when it exists (Docker image / production).
-dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+dist = Path(__file__).resolve().parents[2] / "dist"
 if dist.is_dir():
     app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
