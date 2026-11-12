@@ -1,0 +1,46 @@
+services:
+  db:
+    build: ./database
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mirror}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mirror}
+      POSTGRES_DB: ${POSTGRES_DB:-mirror_city}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mirror} -d ${POSTGRES_DB:-mirror_city}"]
+      interval: 3s
+      retries: 20
+
+  app:
+    build: .
+    environment: &appenv
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mirror}:${POSTGRES_PASSWORD:-mirror}@db:5432/${POSTGRES_DB:-mirror_city}
+      PLATEAU_CITY_CODE: ${PLATEAU_CITY_CODE:-13107}
+      PLATEAU_YEAR: ${PLATEAU_YEAR:-2025}
+      AOI_WEST: ${AOI_WEST:-139.80}
+      AOI_SOUTH: ${AOI_SOUTH:-35.70}
+      AOI_EAST: ${AOI_EAST:-139.83}
+      AOI_NORTH: ${AOI_NORTH:-35.73}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # One-off job: docker compose run --rm ingest
+  ingest:
+    build: .
+    profiles: [ingest]
+    command: python -m ingestion.ingest_citygml
+    environment: *appenv
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
