@@ -128,7 +128,7 @@ export default function Residences() {
 
   function fly(s: Shot, name: string | null, drift = false) {
     setShot(name);
-    estate.current?.go(s, 3.4, drift);
+    estate.current?.go(s, 4.2, drift);
   }
   function openTab(t: Tab) {
     setTab(t);
@@ -174,7 +174,7 @@ export default function Residences() {
 
       {sources && (
         <div className={`${panel} rise absolute right-4 top-14 z-20 w-[min(22rem,calc(100%-2rem))] p-4 text-xs text-white/75 sm:right-8`}>
-          <p>Buildings, trees and bridges: MLIT Project PLATEAU 2025. Facades are drawn where PLATEAU has no photo. Aerial photos: GSI. Land prices: MLIT official land price survey {data?.land_year}, {data?.land_points} survey points. Amenities and walking routes: © OpenStreetMap contributors.</p>
+          <p>Buildings, trees and bridges: MLIT Project PLATEAU 2025. Building exteriors are illustrative where PLATEAU has no photo: shapes and heights are real, materials and windows are not. Aerial photos: GSI. Land prices: MLIT official land price survey {data?.land_year}, {data?.land_points} survey points. Amenities and walking routes: © OpenStreetMap contributors.</p>
           <p className="mt-2">No homes are listed here. Prices are estimates: nearest official land price divided by the plot's permitted floor-area ratio, plus an assumed ¥{BUILD_COST.toLocaleString("en")} per m² to build, over {NET_TO_GROSS * 100}% usable floor. Real sale prices differ.</p>
         </div>
       )}
