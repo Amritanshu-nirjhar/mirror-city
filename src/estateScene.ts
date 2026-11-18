@@ -13,6 +13,7 @@ export interface Shot extends Point {
 export type Light = "morning" | "midday" | "sunset";
 export interface Pin extends Point {
   label: string;
+  z?: number; // metres above ground
 }
 
 const GROUND = 38; // ellipsoid height of Sumida's low ground
@@ -186,7 +187,7 @@ async function loadPhotoreal() {
 export async function createEstate(container: HTMLElement, tiles: Json, onPick: (id: string | null, at: Point | null) => void) {
   const google = await loadPhotoreal();
   const viewer = new Cesium.Viewer(container, {
-    ...(google ? { globe: false as const, baseLayer: false as const } : {
+    ...(google ? { globe: false as const, baseLayer: false as const, skyBox: false as const, skyAtmosphere: new Cesium.SkyAtmosphere() } : {
       baseLayer: new Cesium.ImageryLayer(new Cesium.UrlTemplateImageryProvider({
         url: "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg",
         minimumLevel: 2, maximumLevel: 18,
@@ -209,6 +210,9 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     // Google's attribution must stay visible; the search panel covers the default corner.
     Object.assign(credits.style, { position: "absolute", top: "52px", left: "16px", bottom: "auto", zIndex: "5" });
     scene.primitives.add(google);
+    scene.backgroundColor = Cesium.Color.fromCssColorString("#a9cbe8"); // daylight behind the thin edge of the atmosphere
+    // Google's mesh is built for aerial views: stop the camera going into it.
+    scene.screenSpaceCameraController.minimumZoomDistance = 120;
   } else {
     credits.style.display = "none"; // credited under Sources
     viewer.imageryLayers.get(0).brightness = 1.12;
@@ -399,7 +403,7 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     setPins(list: Pin[]) {
       pins.forEach((p) => viewer.entities.remove(p));
       pins = list.map((p) => viewer.entities.add({
-        position: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, google ? GROUND + 24 : 0),
+        position: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, google ? GROUND + (p.z ?? 24) : 0),
         point: { pixelSize: 8, color: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK.withAlpha(0.5), outlineWidth: 1,
                  heightReference: google ? Cesium.HeightReference.NONE : Cesium.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY },
         label: { text: p.label, font: "500 12px Inter Tight, Noto Sans JP, sans-serif", fillColor: Cesium.Color.WHITE,

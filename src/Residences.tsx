@@ -132,11 +132,16 @@ export default function Residences() {
   const nearby: Json[] = useMemo(() => (data?.amenities[category] ?? [])
     .map(([name, lon, lat]: [string, number, number]) => ({ label: name, lon, lat, away: metres(focus, { lon, lat }) }))
     .sort((a: Json, b: Json) => a.away - b.away).slice(0, 12), [data, category, focus]);
-  useEffect(() => { if (ready) estate.current?.setPins(tab === "Amenities" ? nearby : []); }, [ready, tab, nearby]);
+  useEffect(() => {
+    // Over the photographic city, a marker keeps the chosen building easy to find.
+    const mark = photoreal && home ? [{ lon: home.lon, lat: home.lat, label: home.district, z: home.height + 8 }] : [];
+    if (ready) estate.current?.setPins(tab === "Amenities" ? [...nearby, ...mark] : mark);
+  }, [ready, tab, nearby, photoreal, home]);
 
   function fly(s: Shot, name: string | null, drift = false) {
     setShot(name);
-    estate.current?.go(s, 4.2, drift);
+    // Google's mesh melts up close, so its views stay above the rooftops.
+    estate.current?.go(photoreal ? { ...s, pitch: Math.min(s.pitch, -8), range: Math.max(s.range, 320) } : s, 4.2, drift);
   }
   function openTab(t: Tab) {
     setTab(t);
@@ -254,7 +259,7 @@ export default function Residences() {
                 <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
                   {GALLERY.map((g) => (
                     <button key={g.name} aria-pressed={shot === g.name} className={`border px-3 py-3 text-left transition-colors duration-300 ${shot === g.name ? "border-white bg-white/10" : "border-white/15 hover:border-white/50"}`}
-                            onClick={() => { fly(g.shot, g.name); if (g.light) setLight(g.light); }}>{g.name}</button>
+                            onClick={() => { fly(g.shot, g.name); if (g.light && !photoreal) setLight(g.light); }}>{photoreal && g.light ? "Skytree" : g.name}</button>
                   ))}
                 </div>
               </>
