@@ -53,7 +53,7 @@ void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
   float height = dot(mat3(czm_model) * p, u_up) + dot(czm_model[3].xyz - u_origin, u_up);
   float contact = mix(1.0, mix(0.58, 1.0, smoothstep(0.0, 10.0, height)), wall); // darker where walls meet the street
   vec3 sky = mix(u_horizon * 1.05, mix(u_horizon, u_zenith, 0.3), max(ny, 0.0));
-  float strength = 1.0;
+  float strength = 1.55; // real photos are dark: lift them to sit with the drawn buildings
 #ifndef HAS_BASE_COLOR_TEXTURE
   strength = 0.72;
   vec3 tint = material.diffuse / max(max(material.diffuse.r, max(material.diffuse.g, material.diffuse.b)), 0.001);
@@ -68,32 +68,35 @@ void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
   vec2 size = vec2(mix(2.7, 3.8, r3), mix(2.9, 3.35, r4));
   vec2 cell = m / size;
   vec2 f = fract(cell), bay = floor(cell), w = fwidth(cell) + 1e-4;
-  float detail = 1.0 - smoothstep(0.1, 0.42, max(w.x, w.y));
+  // Window columns blur out first, floor lines much later, so walls keep structure at a distance.
+  float dx = 1.0 - smoothstep(0.16, 0.5, w.x), dy = 1.0 - smoothstep(0.2, 0.62, w.y), detail = dy;
   float rnd = hash2(bay + id);
   float curtain = step(0.9, r2), balcony = step(0.42, r2) * (1.0 - curtain), shop = step(0.5, r5) * (1.0 - step(size.y * 1.15, height));
 
-  float glass, relief = 1.0;
+  float gx, gy, ax, ay, relief = 1.0; // window coverage across and up each cell, and its average
   vec3 c = cladding * (0.9 + 0.14 * noise2(m * vec2(0.5, 0.09) + id)); // weathering runs down the wall
   if (curtain > 0.5) {
-    glass = 1.0 - band(f.x, -0.03, 0.03, w.x) - band(f.x, 0.97, 1.03, w.x) - band(f.y, -0.04, 0.04, w.y) - band(f.y, 0.96, 1.04, w.y);
-    glass = clamp(glass, 0.0, 1.0);
+    gx = 1.0 - band(f.x, -0.03, 0.03, w.x) - band(f.x, 0.97, 1.03, w.x); ax = 0.94;
+    gy = 1.0 - band(f.y, -0.04, 0.04, w.y) - band(f.y, 0.96, 1.04, w.y); ay = 0.92;
   } else if (balcony > 0.5) {
-    glass = band(f.x, 0.07, 0.93, w.x) * band(f.y, 0.3, 0.86, w.y);
+    gx = band(f.x, 0.07, 0.93, w.x); ax = 0.86;
+    gy = band(f.y, 0.3, 0.86, w.y); ay = 0.56;
     float rail = band(f.y, 0.07, 0.29, w.y), slab = band(f.y, -0.01, 0.07, w.y);
     c = mix(c, c * 0.72 + 0.05, rail);
     c = mix(c, c * 1.16, slab);
     relief = 1.0 - 0.42 * band(f.y, 0.84, 1.0, w.y); // the slab above shades the balcony
   } else {
-    glass = band(f.x, 0.2, 0.8, w.x) * band(f.y, 0.3, 0.8, w.y) * step(r2 < 0.2 ? 0.34 : 0.0, rnd);
-    relief = 1.0 - 0.3 * band(f.y, 0.8, 0.86, w.y) * band(f.x, 0.2, 0.8, w.x); // lintel shadow
-    c = mix(c, c * 1.1, band(f.y, 0.25, 0.3, w.y) * band(f.x, 0.17, 0.83, w.x)); // sill
+    gx = band(f.x, 0.2, 0.8, w.x) * step(r2 < 0.2 ? 0.34 : 0.0, rnd); ax = r2 < 0.2 ? 0.4 : 0.6;
+    gy = band(f.y, 0.3, 0.8, w.y); ay = 0.5;
+    relief = 1.0 - 0.3 * band(f.y, 0.8, 0.86, w.y) * mix(0.6, band(f.x, 0.2, 0.8, w.x), dx); // lintel shadow
+    c = mix(c, c * 1.1, band(f.y, 0.25, 0.3, w.y) * mix(0.66, band(f.x, 0.17, 0.83, w.x), dx)); // sill
   }
   if (shop > 0.5) {
-    glass = band(f.x, 0.04, 0.96, w.x) * band(f.y, 0.06, 0.72, w.y);
+    gx = band(f.x, 0.04, 0.96, w.x); ax = 0.92;
+    gy = band(f.y, 0.06, 0.72, w.y); ay = 0.66;
     c = mix(c * 0.55, vec3(0.2, 0.19, 0.18), band(f.y, 0.72, 0.96, w.y));
   }
-  float cover = curtain > 0.5 ? 0.86 : balcony > 0.5 ? 0.42 : 0.24;
-  glass = mix(cover, glass, detail) * wall;
+  float glass = clamp(mix(ax, gx, dx) * mix(ay, gy, dy), 0.0, 1.0) * wall;
   c = mix(cladding * mix(0.86, 1.0, 1.0 - balcony * 0.2), c * relief, detail);
 
   // Glass: dark panes that mirror the sky, more strongly at grazing angles.
@@ -105,16 +108,28 @@ void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
   float fresnel = 0.38 + 0.62 * pow(1.0 - clamp(dot(-v, nE), 0.0, 1.0), 3.0);
   vec3 pane = mix(vec3(0.05, 0.07, 0.09), vec3(0.13, 0.15, 0.17), rnd);
 
-  vec3 roof;
-  if (ny > 0.97) roof = vec3(0.60, 0.59, 0.56) * (0.86 + 0.2 * noise2(p.xy * 0.35 + id)); // flat concrete
-  else {
-    roof = r1 < 0.55 ? vec3(0.26, 0.28, 0.31) : r1 < 0.8 ? vec3(0.42, 0.33, 0.28) : vec3(0.5, 0.5, 0.48);
-    roof *= 0.92 + 0.12 * band(fract(height * 3.2), 0.0, 0.5, fwidth(height * 3.2) + 0.02) * detail;
+  // Roofs come from the aerial survey wherever it covers them.
+  vec3 roof = ny > 0.97 ? vec3(0.60, 0.59, 0.56) * (0.86 + 0.2 * noise2(p.xy * 0.35 + id))
+            : (r1 < 0.55 ? vec3(0.26, 0.28, 0.31) : r1 < 0.8 ? vec3(0.42, 0.33, 0.28) : vec3(0.5, 0.5, 0.48));
+  float aerial = 0.0;
+  if (u_photos > 0.5) {
+    vec3 world = mat3(czm_model) * p + czm_model[3].xyz - u_origin;
+    vec2 en = vec2(dot(world, u_east), dot(world, u_north));
+    vec2 a = (en - u_nearMin) / u_nearSize, b = (en - u_wideMin) / u_wideSize;
+    bool near = all(greaterThan(a, vec2(0.0))) && all(lessThan(a, vec2(1.0)));
+    bool wide = all(greaterThan(b, vec2(0.0))) && all(lessThan(b, vec2(1.0)));
+    if (near || wide) {
+      vec3 shot = pow((near ? texture(u_near, a) : texture(u_wide, b)).rgb, vec3(2.2));
+      // Tall roofs lean away from where the camera plane saw them, so they rely on the photo less.
+      roof = mix(shot * 1.25, roof, 0.55 * smoothstep(30.0, 95.0, height));
+      aerial = 1.0;
+    }
   }
   material.diffuse = mix(roof, mix(c, pane, glass), wall) * tint;
   material.roughness = mix(0.92, 0.12, glass);
   material.specular = mix(vec3(0.04), vec3(0.3), glass);
   material.emissive += mirror * fresnel * glass * tint * 1.25;
+  material.emissive += roof * (1.0 - wall) * aerial * 0.12 * tint;
   material.emissive += vec3(1.0, 0.68, 0.36) * glass * step(0.62, rnd) * u_glow * detail * (1.0 - curtain * 0.5);
 #endif
   material.emissive += material.diffuse * sky * u_ambient * strength * contact;
@@ -204,6 +219,28 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   buildings.colorBlendMode = Cesium.Cesium3DTileColorBlendMode.MIX;
   buildings.colorBlendAmount = 0.42;
   const origin = Cesium.Cartesian3.fromDegrees(139.815, 35.715, GROUND);
+  const frame = Cesium.Transforms.eastNorthUpToFixedFrame(origin);
+  const axis = (i: number) => Cesium.Cartesian3.fromCartesian4(Cesium.Matrix4.getColumn(frame, i, new Cesium.Cartesian4()));
+  const photos: Json = await fetch("/roofs.json").then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  const photoTexture = (p?: Json) => ({
+    type: Cesium.UniformType.SAMPLER_2D,
+    value: new Cesium.TextureUniform({
+      url: p?.url ?? "data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=",
+      repeat: false, minificationFilter: Cesium.TextureMinificationFilter.LINEAR_MIPMAP_LINEAR,
+      magnificationFilter: Cesium.TextureMagnificationFilter.LINEAR, maximumAnisotropy: 8,
+    }),
+  });
+  const photoBounds = (name: string, p?: Json) => {
+    const local = (lon: number, lat: number) => {
+      const d = Cesium.Cartesian3.subtract(Cesium.Cartesian3.fromDegrees(lon, lat, GROUND), origin, new Cesium.Cartesian3());
+      return new Cesium.Cartesian2(Cesium.Cartesian3.dot(d, axis(0)), Cesium.Cartesian3.dot(d, axis(1)));
+    };
+    const min = p ? local(p.west, p.south) : new Cesium.Cartesian2(), max = p ? local(p.east, p.north) : new Cesium.Cartesian2(1, 1);
+    return {
+      [`u_${name}Min`]: { type: Cesium.UniformType.VEC2, value: min },
+      [`u_${name}Size`]: { type: Cesium.UniformType.VEC2, value: Cesium.Cartesian2.subtract(max, min, new Cesium.Cartesian2()) },
+    };
+  };
   const facade = new Cesium.CustomShader({
     mode: Cesium.CustomShaderMode.MODIFY_MATERIAL,
     uniforms: {
@@ -212,6 +249,13 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
       u_zenith: { type: Cesium.UniformType.VEC3, value: new Cesium.Cartesian3(...LIGHTS.midday.zenith) },
       u_horizon: { type: Cesium.UniformType.VEC3, value: new Cesium.Cartesian3(...LIGHTS.midday.horizon) },
       u_glow: { type: Cesium.UniformType.FLOAT, value: 0 },
+      u_east: { type: Cesium.UniformType.VEC3, value: axis(0) },
+      u_north: { type: Cesium.UniformType.VEC3, value: axis(1) },
+      u_photos: { type: Cesium.UniformType.FLOAT, value: photos ? 1 : 0 },
+      u_near: photoTexture(photos?.near),
+      u_wide: photoTexture(photos?.wide),
+      ...photoBounds("near", photos?.near),
+      ...photoBounds("wide", photos?.wide),
       u_ambient: { type: Cesium.UniformType.FLOAT, value: LIGHTS.midday.ambient },
     },
     fragmentShaderText: FACADE,
