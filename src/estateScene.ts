@@ -3,6 +3,7 @@
 import * as Cesium from "cesium";
 import { api, type Json, type Point } from "./api";
 import { loadTerrain } from "./viewer";
+import { ParticleWater, peakDepth, NEVER, type FloodField } from "./floodSim";
 
 export interface Shot extends Point {
   z: number; // metres above ground of the point the camera looks at
@@ -257,25 +258,82 @@ function river() {
   });
 }
 
-/** Google's photorealistic city through Cesium ion, when a token is configured; otherwise null. */
+/**
+ * Google's photorealistic city. A Google Maps key loads it directly; otherwise a Cesium ion token
+ * loads it through ion, whose terms require the ion logo to stay on screen.
+ */
 async function loadPhotoreal() {
+  const key = import.meta.env.VITE_GOOGLE_MAPS_KEY as string | undefined;
   const token = import.meta.env.VITE_CESIUM_ION_TOKEN as string | undefined;
-  if (!token) return null;
-  Cesium.Ion.defaultAccessToken = token;
+  if (!key && !token) return null;
+  if (token) Cesium.Ion.defaultAccessToken = token;
   try {
-    return await Cesium.createGooglePhotorealistic3DTileset(undefined, {
+    const tileset = await Cesium.createGooglePhotorealistic3DTileset({ key: key || undefined, onlyUsingWithGoogleGeocoder: true }, {
       ...STREAMING, showCreditsOnScreen: true, maximumScreenSpaceError: 16,
-      cacheBytes: 384 * 1024 * 1024, maximumCacheOverflowBytes: 256 * 1024 * 1024,
+      cacheBytes: 256 * 1024 * 1024, maximumCacheOverflowBytes: 128 * 1024 * 1024,
     });
+    return { tileset, direct: !!key };
   } catch (e) {
     console.warn("Photorealistic tiles unavailable, using the PLATEAU city:", e);
     return null;
   }
 }
 
+const DATUM = 36.9; // height of Tokyo Bay mean sea level above the ellipsoid here (geoid), metres
+const WATER_VS = `
+in vec3 position3DHigh;
+in vec3 position3DLow;
+in float batchId;
+in float arrive;
+in float peak;
+uniform float u_t;
+uniform vec3 u_up;
+out float v_age;
+out float v_peak;
+out vec3 v_eye;
+out vec3 v_world;
+void main() {
+  float rise = clamp((u_t - arrive + 0.25) / 3.0, 0.0, 1.0);
+  vec4 p = czm_translateRelativeToEye(position3DHigh, position3DLow);
+  p.xyz += u_up * (peak * rise + 0.08);
+  v_age = u_t - arrive;
+  v_peak = peak;
+  v_world = position3DLow + position3DHigh;
+  vec4 eye = czm_modelViewRelativeToEye * p;
+  v_eye = eye.xyz;
+  gl_Position = czm_projection * eye;
+}`;
+const WATER_FS = `
+in float v_age;
+in float v_peak;
+in vec3 v_eye;
+in vec3 v_world;
+uniform vec3 u_up;
+uniform vec3 u_east;
+float wave(vec2 p, float t) {
+  return sin(p.x * 0.19 + t * 1.3) * 0.5 + sin(p.y * 0.23 - t * 1.1) * 0.5 + sin((p.x + p.y) * 0.47 + t * 2.1) * 0.25 + sin((p.x - p.y) * 0.83 - t * 2.7) * 0.12;
+}
+void main() {
+  if (v_age < 0.0 || v_peak <= 0.0) discard;
+  vec3 north = cross(u_up, u_east);
+  vec2 p = vec2(dot(v_world, u_east), dot(v_world, north));
+  float t = czm_frameNumber / 60.0, e = 0.8;
+  float h = wave(p, t);
+  vec3 nW = normalize(u_up + (u_east * (h - wave(p + vec2(e, 0.0), t)) + north * (h - wave(p + vec2(0.0, e), t))) * 0.22);
+  vec3 n = normalize(czm_viewRotation * nW), v = normalize(-v_eye);
+  float fresnel = 0.18 + 0.82 * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 3.0);
+  vec3 sky = mix(vec3(0.62, 0.74, 0.84), vec3(0.3, 0.48, 0.7), clamp(reflect(-v, n).y, 0.0, 1.0));
+  vec3 deep = mix(vec3(0.34, 0.30, 0.22), vec3(0.09, 0.16, 0.18), smoothstep(0.3, 4.0, v_peak)); // silty river water
+  vec3 c = mix(deep, sky, fresnel);
+  float sun = pow(clamp(dot(reflect(-v, n), normalize(czm_sunDirectionEC)), 0.0, 1.0), 180.0);
+  float foam = (1.0 - smoothstep(0.0, 1.1, v_age)) * smoothstep(0.1, 0.9, h * 0.5 + 0.5 + sin(p.x * 1.7 + t * 3.0) * 0.2);
+  out_FragColor = vec4(mix(c + sun * vec3(1.0, 0.95, 0.85), vec3(0.93, 0.95, 0.94), foam), mix(0.86, 0.95, foam));
+}`;
+
 export async function createEstate(container: HTMLElement, tiles: Json, onPick: (id: string | null, at: Point | null) => void,
                                    onStatus: (s: RenderStatus) => void) {
-  const google = await loadPhotoreal();
+  const photo = await loadPhotoreal();
+  const google = photo?.tileset ?? null;
   const viewer = new Cesium.Viewer(container, {
     ...(google ? { globe: false as const, baseLayer: false as const, skyBox: false as const, skyAtmosphere: new Cesium.SkyAtmosphere() } : {
       baseLayer: new Cesium.ImageryLayer(new Cesium.UrlTemplateImageryProvider({
@@ -298,6 +356,8 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   const credits = viewer.cesiumWidget.creditContainer as HTMLElement;
   if (google) {
     // Google's attribution must stay visible; the search panel covers the default corner.
+    // ion's terms require its logo while ion serves the tiles; a direct Google key does not use ion.
+    if (photo?.direct) (credits.querySelector(".cesium-credit-logoContainer") as HTMLElement | null)?.style.setProperty("display", "none");
     Object.assign(credits.style, { position: "absolute", top: "52px", left: "16px", bottom: "auto", zIndex: "5" });
     scene.primitives.add(google);
     scene.backgroundColor = Cesium.Color.fromCssColorString("#a9cbe8"); // daylight behind the thin edge of the atmosphere
@@ -335,7 +395,9 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     maximumScreenSpaceError: 16,
     shadows: Cesium.ShadowMode.ENABLED,
     ...STREAMING,
-    cacheBytes: 512 * 1024 * 1024, maximumCacheOverflowBytes: 256 * 1024 * 1024,
+    // Over Google's city these only back the search overlay, so they stay light.
+    ...(google ? { maximumScreenSpaceError: 64, cacheBytes: 64 * 1024 * 1024, maximumCacheOverflowBytes: 32 * 1024 * 1024 }
+               : { cacheBytes: 512 * 1024 * 1024, maximumCacheOverflowBytes: 256 * 1024 * 1024 }),
   };
   let textured = true;
   let buildings: Cesium.Cesium3DTileset;
@@ -522,7 +584,86 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
            c ? { lon: Cesium.Math.toDegrees(c.longitude), lat: Cesium.Math.toDegrees(c.latitude) } : null);
   }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
+  // Flood simulation: a water surface that rises per GSI's timing, plus physics particles.
+  let flood: { surface: Cesium.Primitive; spray: Cesium.PointPrimitiveCollection; sim: ParticleWater; points: Cesium.PointPrimitive[]; origin: Cesium.Matrix4; toLocal: Cesium.Matrix4; field: FloodField } | null = null;
+  let floodTime = 0, floodTarget = -1, floodClock = performance.now();
+  function buildFlood(field: FloodField) {
+    const { w, h, west, south, east, north, arrive, depthClass, elev } = field, skip = 2;
+    const cols = Math.floor((w - 1) / skip) + 1, rows = Math.floor((h - 1) / skip) + 1, n = cols * rows;
+    const positions = new Float64Array(n * 3), arrives = new Float32Array(n), peaks = new Float32Array(n), xyz = new Cesium.Cartesian3();
+    for (let r = 0; r < rows; r++) for (let q = 0; q < cols; q++) {
+      const i = q * skip, j = r * skip, c = i + j * w, v = q + r * cols;
+      Cesium.Cartesian3.fromDegrees(west + ((i + 0.5) / w) * (east - west), south + ((j + 0.5) / h) * (north - south), DATUM + elev[c] / 10, undefined, xyz);
+      positions.set([xyz.x, xyz.y, xyz.z], v * 3);
+      arrives[v] = arrive[c] === NEVER ? 400 : arrive[c];
+      peaks[v] = depthClass[c] ? peakDepth(field, c) : 0;
+    }
+    const indices = new Uint32Array((cols - 1) * (rows - 1) * 6);
+    let k = 0;
+    for (let r = 0; r < rows - 1; r++) for (let q = 0; q < cols - 1; q++) {
+      const a = q + r * cols, b = a + 1, c = a + cols, d = c + 1;
+      indices.set([a, b, d, a, d, c], k); k += 6;
+    }
+    const attribute = (componentDatatype: Cesium.ComponentDatatype, componentsPerAttribute: number, values: Float32Array | Float64Array) =>
+      new Cesium.GeometryAttribute({ componentDatatype, componentsPerAttribute, values });
+    const geometry = new Cesium.Geometry({
+      attributes: {
+        position: attribute(Cesium.ComponentDatatype.DOUBLE, 3, positions),
+        arrive: attribute(Cesium.ComponentDatatype.FLOAT, 1, arrives),
+        peak: attribute(Cesium.ComponentDatatype.FLOAT, 1, peaks),
+      } as unknown as Cesium.GeometryAttributes,
+      indices, primitiveType: Cesium.PrimitiveType.TRIANGLES,
+      boundingSphere: Cesium.BoundingSphere.fromVertices(Array.from(positions)),
+    });
+    const centre = Cesium.Cartesian3.fromDegrees(west, south, DATUM), originM = Cesium.Transforms.eastNorthUpToFixedFrame(centre);
+    const up = Cesium.Cartesian3.fromCartesian4(Cesium.Matrix4.getColumn(originM, 2, new Cesium.Cartesian4()));
+    const eastAxis = Cesium.Cartesian3.fromCartesian4(Cesium.Matrix4.getColumn(originM, 0, new Cesium.Cartesian4()));
+    const appearance = new Cesium.Appearance({
+      translucent: true, closed: false, vertexShaderSource: WATER_VS, fragmentShaderSource: WATER_FS,
+      renderState: (Cesium.Appearance as unknown as { getDefaultRenderState: (translucent: boolean, closed: boolean, extra: object) => object }).getDefaultRenderState(true, false, { cull: { enabled: false } }),
+    }) as Cesium.Appearance & { uniforms: Record<string, unknown> };
+    appearance.uniforms = { get u_t() { return floodTime; }, u_up: up, u_east: eastAxis };
+    const surface = scene.primitives.add(new Cesium.Primitive({
+      geometryInstances: new Cesium.GeometryInstance({ geometry }), appearance,
+      asynchronous: false, compressVertices: false, allowPicking: false, vertexCacheOptimize: false, show: false,
+    })) as Cesium.Primitive;
+    const spray = scene.primitives.add(new Cesium.PointPrimitiveCollection({ modelMatrix: originM, blendOption: Cesium.BlendOption.TRANSLUCENT })) as Cesium.PointPrimitiveCollection;
+    spray.show = false;
+    const sim = new ParticleWater(field, 4500), white = Cesium.Color.WHITE.withAlpha(0.8), blue = Cesium.Color.fromCssColorString("#bcd8e4").withAlpha(0.65);
+    const scale = new Cesium.NearFarScalar(60, 1.5, 3500, 0.45);
+    const points = Array.from({ length: sim.count }, (_, i) => spray.add({ show: false, pixelSize: i % 3 ? 3 : 4.5, color: i % 3 ? blue : white, scaleByDistance: scale }));
+    flood = { surface, spray, sim, points, origin: originM, toLocal: Cesium.Matrix4.inverseTransformation(originM, new Cesium.Matrix4()), field };
+  }
+  const local = new Cesium.Cartesian3(), spot = new Cesium.Cartesian3();
+  scene.preUpdate.addEventListener(() => {
+    const now = performance.now(), dt = Math.min((now - floodClock) / 1000, 0.05);
+    floodClock = now;
+    if (!flood || floodTarget < 0) return;
+    floodTime += (floodTarget - floodTime) * Math.min(dt * 6, 1);
+    Cesium.Matrix4.multiplyByPoint(flood.toLocal, focus, local);
+    const { sim, points } = flood;
+    sim.step(dt, floodTime, local.x, local.y, Math.min(radius, 1500));
+    const R = 6378137;
+    for (let i = 0; i < sim.count; i++) {
+      const alive = sim.life[i] > 0;
+      if (points[i].show !== alive) points[i].show = alive;
+      if (alive) {
+        const dx = sim.x[i], dy = sim.y[i];
+        spot.x = dx; spot.y = dy; spot.z = sim.z[i] + 0.25 - (dx * dx + dy * dy) / (2 * R); // follow the Earth's curve
+        points[i].position = spot;
+      }
+    }
+  });
+
   return {
+    /** Show the flood at a fractional GSI time step, or remove it with null. */
+    setFlood(field: FloodField | null, step = 0) {
+      if (field && !flood) buildFlood(field);
+      floodTarget = field ? step : -1;
+      if (field && step < floodTime - 1) floodTime = step; // a restart should not drain visibly
+      if (flood) flood.surface.show = flood.spray.show = !!field;
+    },
+
     textured,
     photoreal: !!google,
     destroy: () => viewer.destroy(),

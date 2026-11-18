@@ -2,6 +2,7 @@
 // walking times are real; open data has no listings, so prices are labelled estimates.
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Json } from "./api";
+import { depthAt, loadFloodField, NEVER, type FloodField } from "./floodSim";
 import { createEstate, RADIUS, type Estate, type Light, type RenderStatus, type Shot } from "./estateScene";
 
 // Assumptions behind the estimate (calibration knobs).
@@ -28,7 +29,9 @@ const SIGHTS: { name: string; note: string; shot: Shot }[] = [
   { name: "Asakusa skyline", note: "Across the river from Azumabashi, seen from the Sumida side.", shot: { lon: 139.7985, lat: 35.7115, z: 30, heading: 285, pitch: -9, range: 1100 } },
 ];
 const TIMES: [Light, string][] = [["morning", "Morning"], ["midday", "Midday"], ["sunset", "Sunset"]];
-const NAV = ["Home", "Gallery", "Surroundings", "Amenities"] as const;
+const NAV = ["Home", "Gallery", "Surroundings", "Amenities", "Flood"] as const;
+const FLOOD_VIEW: Shot = { lon: 139.8135, lat: 35.7135, z: 0, heading: 35, pitch: -30, range: 1500 };
+const FLOOD_SECONDS = 45; // the first water to the last, on screen
 type Tab = (typeof NAV)[number];
 
 interface Home {
@@ -77,6 +80,9 @@ export default function Residences() {
   const [status, setStatus] = useState<RenderStatus | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [showTiles, setShowTiles] = useState(false);
+  const [field, setField] = useState<FloodField | null>(null);
+  const [floodStep, setFloodStep] = useState(0);
+  const [floodPlaying, setFloodPlaying] = useState(false);
   const homesRef = useRef<Home[]>([]);
   const [category, setCategory] = useState("parks");
   const [minArea, setMinArea] = useState(50), [maxArea, setMaxArea] = useState(100);
@@ -129,6 +135,32 @@ export default function Residences() {
   useEffect(() => { if (ready) estate.current?.setLight(light); }, [ready, light]);
   useEffect(() => { if (ready) estate.current?.setRadius(radius); }, [ready, radius]);
   useEffect(() => { if (ready) estate.current?.showTiles(showTiles); }, [ready, showTiles]);
+  const lastFloodStep = useMemo(() => (field ? field.arrive.reduce((m, a) => (a !== NEVER && a > m ? a : m), 0) + 3 : 1), [field]);
+  useEffect(() => {
+    if (tab !== "Flood" || field) return;
+    loadFloodField().then(setField, (e) => setFailed(e instanceof Error ? e.message : String(e)));
+  }, [tab, field]);
+  useEffect(() => { if (ready) estate.current?.setFlood(tab === "Flood" ? field : null, floodStep); }, [ready, tab, field, floodStep]);
+  useEffect(() => {
+    if (!floodPlaying || tab !== "Flood" || !field) return;
+    const timer = setInterval(() => setFloodStep((s) => {
+      const next = s + (lastFloodStep / FLOOD_SECONDS) * 0.1;
+      if (next >= lastFloodStep) setFloodPlaying(false);
+      return Math.min(next, lastFloodStep);
+    }), 100);
+    return () => clearInterval(timer);
+  }, [floodPlaying, tab, field, lastFloodStep]);
+  const floodStats = useMemo(() => {
+    if (!field) return null;
+    let wet = 0;
+    for (let c = 0; c < field.arrive.length; c++) if (depthAt(field, c, floodStep) > 0) wet++;
+    const reached = homes.filter((h) => {
+      const i = Math.floor(((h.lon - field.west) / (field.east - field.west)) * field.w), j = Math.floor(((h.lat - field.south) / (field.north - field.south)) * field.h);
+      return i >= 0 && j >= 0 && i < field.w && j < field.h && depthAt(field, i + j * field.w, floodStep) > 0;
+    }).length;
+    const m = field.steps[Math.min(Math.floor(floodStep), field.steps.length - 1)];
+    return { km2: (wet * field.cell * field.cell) / 1e6, reached, time: `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min` };
+  }, [field, floodStep, homes]);
   useEffect(() => {
     if (ready) estate.current?.setMatches(tab === "Home" ? new Set(results.map((h) => h.id)) : new Set(), chosen);
   }, [ready, results, chosen, tab]);
@@ -156,6 +188,7 @@ export default function Residences() {
     if (t === "Home") fly(HOME, null, true);
     if (t === "Gallery") fly(GALLERY[1].shot, GALLERY[1].name);
     if (t === "Surroundings") fly(SIGHTS[0].shot, SIGHTS[0].name);
+    if (t === "Flood") { fly(FLOOD_VIEW, null); setFloodStep(0); setFloodPlaying(true); }
     if (t === "Amenities") fly({ ...focus, z: 0, heading: 0, pitch: -58, range: 1250 }, null);
   }
   function viewHome(h: Home) {
@@ -280,6 +313,22 @@ export default function Residences() {
                   {SIGHTS.map((s) => <button key={s.name} aria-pressed={shot === s.name} className={`${chip(shot === s.name)} h-9`} onClick={() => fly(s.shot, s.name)}>{s.name}</button>)}
                 </div>
                 <p className="mt-3 max-w-2xl text-white/75">{SIGHTS.find((s) => s.name === shot)?.note ?? "Choose a place to travel to it."}</p>
+              </>
+            )}
+            {tab === "Flood" && (
+              <>
+                <div className="flex flex-wrap items-baseline justify-between gap-x-4">
+                  <h1 className={eyebrow}>River flood simulation</h1>
+                  <p className="text-xs text-white/60">{field?.scenario ?? "Loading the scenario…"}</p>
+                </div>
+                <div className="mt-3 flex items-center gap-3">
+                  <button className={chip(floodPlaying)} disabled={!field} onClick={() => { if (floodStep >= lastFloodStep) setFloodStep(0); setFloodPlaying(!floodPlaying); }}>{floodPlaying ? "Pause" : "Play"}</button>
+                  <input type="range" className="min-w-0 flex-1" aria-label="Time since the levee breach" min={0} max={lastFloodStep} step={0.05} value={floodStep}
+                         onChange={(e) => { setFloodPlaying(false); setFloodStep(Number(e.target.value)); }} />
+                  <span className="text-lg font-light tabular-nums">{floodStats?.time ?? "—"}</span>
+                </div>
+                {floodStats && <p className="mt-2 text-xs tabular-nums text-white/70">{floodStats.km2.toFixed(1)} km² under water here · {floodStats.reached.toLocaleString("en")} of {homes.length.toLocaleString("en")} apartment buildings reached</p>}
+                <p className="mt-1 text-[11px] text-white/45">Hypothetical breach: extent, timing and depth bands are GSI's published scenario. Waves and particle motion are an illustrative physics effect, sped up. Not a forecast or evacuation guidance.</p>
               </>
             )}
             {tab === "Amenities" && (
