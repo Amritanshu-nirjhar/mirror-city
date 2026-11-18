@@ -44,13 +44,13 @@ void main() {
   vec2 uv = v_textureCoordinates;
   vec2 size = czm_viewport.zw;
   float r = length((uv - 0.5) * vec2(size.x / size.y, 1.0));
-  float amount = smoothstep(0.3, 0.72, r);
+  float amount = smoothstep(0.33, 0.78, r);
   vec4 c = texture(colorTexture, uv);
   if (amount > 0.004) {
     vec4 sum = c;
     for (int i = 1; i <= 12; i++) {
       float a = float(i) * 2.39996, d = sqrt(float(i) / 12.0);
-      sum += texture(colorTexture, uv + vec2(cos(a), sin(a)) * d * amount * 5.5 * czm_pixelRatio / size);
+      sum += texture(colorTexture, uv + vec2(cos(a), sin(a)) * d * amount * 3.2 * czm_pixelRatio / size);
     }
     c = sum / 13.0;
   }
