@@ -43,9 +43,7 @@ def cached(name, fetch):
     return json.loads(path.read_text())
 
 
-def overpass():
-    w, s, e, n = EXTENT
-    query = f'[out:json][timeout:120];(way["highway"]({s},{w},{n},{e});node["railway"="station"]({s},{w},{n},{e}););out geom qt;'
+def overpass_query(query):
     body = urllib.parse.urlencode({"data": query}).encode()
     for attempt in range(6):  # the public servers are often at capacity: back off and alternate
         try:
@@ -54,6 +52,11 @@ def overpass():
             print(f"Overpass attempt {attempt + 1} failed ({err}); retrying")
             time.sleep(10 * 2 ** attempt)
     raise SystemExit("OpenStreetMap Overpass servers unavailable. Try again later.")
+
+
+def overpass():
+    w, s, e, n = EXTENT
+    return overpass_query(f'[out:json][timeout:120];(way["highway"]({s},{w},{n},{e});node["railway"="station"]({s},{w},{n},{e}););out geom qt;')
 
 
 def walkable(tags):

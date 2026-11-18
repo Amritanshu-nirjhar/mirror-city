@@ -239,7 +239,8 @@ export default function App() {
       <header className="pointer-events-none absolute inset-x-0 top-0 flex items-baseline gap-6 px-8 pt-6">
         <div className="text-[15px] font-semibold tracking-[-0.02em]">Mirror City</div>
         <div className="text-dim">Sumida Ward, Tokyo{meta && ` — PLATEAU ${meta.dataset.year}`}</div>
-        <button className={`pointer-events-auto ml-auto ${link}`} onClick={() => setShowSources(!showSources)}>Sources</button>
+        <a className={`pointer-events-auto ml-auto ${link}`} href="#/">Residences</a>
+        <button className={`pointer-events-auto ${link}`} onClick={() => setShowSources(!showSources)}>Sources</button>
       </header>
 
       {showSources && meta && (

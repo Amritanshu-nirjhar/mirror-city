@@ -46,7 +46,7 @@ function groundPolygons(fc: Json, colourOf: (props: Json) => Cesium.Color) {
 const FLAT_GROUND = 38;
 
 /** PLATEAU terrain, or flat ground if its server is down: a terrain outage must not take the whole map with it. */
-async function loadTerrain(url: string): Promise<Cesium.TerrainProvider> {
+export async function loadTerrain(url: string): Promise<Cesium.TerrainProvider> {
   try {
     return await Promise.race([
       Cesium.CesiumTerrainProvider.fromUrl(url),
