@@ -2,7 +2,7 @@
 // walking times are real; open data has no listings, so prices are labelled estimates.
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Json } from "./api";
-import { createEstate, type Estate, type Light, type Shot } from "./estateScene";
+import { createEstate, type Estate, type Light, type RenderDistance, type Shot } from "./estateScene";
 
 // Assumptions behind the estimate (calibration knobs).
 const BUILD_COST = 450_000; // yen per m² of floor built
@@ -73,6 +73,7 @@ export default function Residences() {
   const [chosen, setChosen] = useState<string | null>(null);
   const [sources, setSources] = useState(false);
   const [photoreal, setPhotoreal] = useState(false);
+  const [distance, setDistance] = useState<RenderDistance>("medium");
   const homesRef = useRef<Home[]>([]);
   const [category, setCategory] = useState("parks");
   const [minArea, setMinArea] = useState(50), [maxArea, setMaxArea] = useState(100);
@@ -123,6 +124,7 @@ export default function Residences() {
   }, []);
 
   useEffect(() => { if (ready) estate.current?.setLight(light); }, [ready, light]);
+  useEffect(() => { if (ready) estate.current?.setRenderDistance(distance); }, [ready, distance]);
   useEffect(() => {
     if (ready) estate.current?.setMatches(tab === "Home" ? new Set(results.map((h) => h.id)) : new Set(), chosen);
   }, [ready, results, chosen, tab]);
@@ -176,7 +178,13 @@ export default function Residences() {
 
       <header className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center gap-4 px-4 pt-4 sm:px-8 sm:pt-6">
         <div className="text-[15px] font-light tracking-[0.3em]">SUMIDA</div>
-        <div className={`pointer-events-auto ml-auto flex items-center gap-1 ${photoreal ? "invisible" : ""}`} role="group" aria-label="Time of day">
+        <label className="pointer-events-auto ml-auto flex items-center gap-1.5 text-xs text-white/70">
+          <span className="hidden sm:inline">Render distance</span>
+          <select aria-label="Render distance" className="border-0 bg-transparent py-1 text-xs text-white outline-none" value={distance} onChange={(e) => setDistance(e.target.value as RenderDistance)}>
+            <option value="near">Near</option><option value="medium">Medium</option><option value="far">Far</option>
+          </select>
+        </label>
+        <div className={`pointer-events-auto flex items-center gap-1 ${photoreal ? "hidden" : ""}`} role="group" aria-label="Time of day">
           {TIMES.map(([id, label]) => (
             <button key={id} aria-pressed={light === id} onClick={() => setLight(id)} className={`px-2 py-1 text-xs transition-colors ${light === id ? "text-white" : "text-white/55 hover:text-white"}`}>{label}</button>
           ))}
