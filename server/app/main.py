@@ -9,7 +9,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import gsi, sims
+from . import gsi, section, sims
 from .db import DatabaseUnavailable, pool, row, rows
 
 
@@ -23,6 +23,7 @@ async def lifespan(_):
 app = FastAPI(title="Mirror City V1", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=10_000)  # GeoJSON layers are megabytes of coordinates
 app.include_router(sims.router)  # evacuation, transit and solar simulators
+app.include_router(section.router)  # real-time section cuts
 
 Lon = Annotated[float, Query(ge=-180, le=180)]
 Lat = Annotated[float, Query(ge=-90, le=90)]

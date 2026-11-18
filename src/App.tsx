@@ -3,6 +3,7 @@ import { api, type Json, type Point, type Scenario } from "./api";
 import { createScene, rankColour, type LayerId, type Pick, type Scene, type ZoneType } from "./viewer";
 import { STEP_MS } from "./water";
 import { MODES, useSim, type Mode } from "./Sims";
+import { useSection } from "./Section";
 
 interface Selection {
   point: Point;
@@ -211,6 +212,8 @@ export default function App() {
   }
 
   const sim = useSim(mode, scene, ready, scenario, stages ? undefined : minutes, sel?.building?.gml_id ?? null, fail);
+  const section = useSection(mode === "section", scene, ready, sel?.point ?? meta?.pilot, scenario, stages ? undefined : minutes,
+                             sel?.building?.gml_id ?? null, (id) => select({ isBuilding: true, gmlId: id, point: null }), fail);
   const depthNow = hydro?.series?.find((p: Json) => p.minutes === minutes)?.depth_m;
   const b = sel?.building;
   const stat = dash?.static;
@@ -274,7 +277,7 @@ export default function App() {
             {scenario ? "Stop simulation" : searching ? "Asking GSI…" : "Run river flood"}
             <span aria-hidden className="text-xs">{scenario ? "■" : "▶"}</span>
           </button>
-          {!scenario && ([["storm_surge", "Run storm surge"], ["earthquake_shaking", "Run earthquake"]] as const).map(([type, label]) => (
+          {!scenario && mode !== "section" && ([["storm_surge", "Run storm surge"], ["earthquake_shaking", "Run earthquake"]] as const).map(([type, label]) => (
             <button key={type} onClick={() => runZones(type)} disabled={!ready}
                     className="-mt-3 mb-3 flex w-full items-center justify-between border border-line px-4 py-3 text-[15px] font-medium transition-colors duration-200 hover:border-ink disabled:opacity-50">
               {label}
@@ -303,6 +306,7 @@ export default function App() {
         </div>
 
         {mode !== "flood" && sim.headline}
+        {section.panel}
         {mode === "flood" && stat && (
           <div className="rise pointer-events-auto">
             <div className="font-medium leading-[0.85] tracking-[-0.06em] text-[clamp(4rem,8vw,7rem)]">
@@ -362,6 +366,7 @@ export default function App() {
           )}
 
           {mode !== "flood" && sim.inspector && <Block title={sim.title}>{sim.inspector}</Block>}
+          {section.inspector && <Block title="In this section">{section.inspector}</Block>}
 
           <Block title="Breach scenario">
             {found && found.list.length > 0 ? (
@@ -416,6 +421,12 @@ export default function App() {
         </aside>
       )}
 
+      {section.drawing && (
+        <div className={`pointer-events-none absolute inset-x-0 flex justify-center px-4 ${scenario ? "bottom-48" : "bottom-8"}`}>
+          <div className={`${glass} rise w-[min(44rem,100%)] px-4 py-3`}>{section.drawing}</div>
+        </div>
+      )}
+
       {/* Timeline, or the opening hint */}
       <div className="pointer-events-none absolute inset-x-0 bottom-8 flex justify-center px-4">
         {scenario ? (
@@ -448,7 +459,7 @@ export default function App() {
             {!stages && !scenario.tile_url_template && <p className="mt-2 text-xs text-accent">GSI publishes no map tiles for this scenario class.</p>}
           </div>
         ) : (
-          !sel && meta && <div className="rise text-dim">Click a building to inspect it, or the ground to pick a point.</div>
+          !sel && meta && mode !== "section" && <div className="rise text-dim">Click a building to inspect it, or the ground to pick a point.</div>
         )}
       </div>
 

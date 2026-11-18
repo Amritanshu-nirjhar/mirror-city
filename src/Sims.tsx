@@ -5,12 +5,13 @@ import { useEffect, useMemo, useState, type ReactNode, type RefObject } from "re
 import { api, type Json, type Scenario } from "./api";
 import type { Scene } from "./viewer";
 
-export type Mode = "flood" | "evacuation" | "transit" | "solar";
+export type Mode = "flood" | "evacuation" | "transit" | "solar" | "section";
 export const MODES: { id: Mode; label: string }[] = [
   { id: "flood", label: "Flood" },
   { id: "evacuation", label: "Evacuation" },
   { id: "transit", label: "Transit" },
   { id: "solar", label: "Solar" },
+  { id: "section", label: "Sections" },
 ];
 
 const EVAC = { out: "#34d399", up: "#facc15", stuck: "#ef4444" };

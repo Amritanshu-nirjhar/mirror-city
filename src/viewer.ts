@@ -42,6 +42,24 @@ function groundPolygons(fc: Json, colourOf: (props: Json) => Cesium.Color) {
   });
 }
 
+// Ellipsoid height of low-lying Sumida: the geoid here (about 37 m) plus a metre or so of ground.
+const FLAT_GROUND = 38;
+
+/** PLATEAU terrain, or flat ground if its server is down: a terrain outage must not take the whole map with it. */
+async function loadTerrain(url: string): Promise<Cesium.TerrainProvider> {
+  try {
+    return await Promise.race([
+      Cesium.CesiumTerrainProvider.fromUrl(url),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), 10000)),
+    ]);
+  } catch (e) {
+    console.warn("PLATEAU terrain unavailable, using flat ground:", e);
+    return new Cesium.CustomHeightmapTerrainProvider({
+      width: 16, height: 16, callback: () => new Float32Array(256).fill(FLAT_GROUND),
+    });
+  }
+}
+
 export async function createScene(container: HTMLElement, meta: Json, onPick: (p: Pick) => void) {
   const viewer = new Cesium.Viewer(container, {
     baseLayer: new Cesium.ImageryLayer(
@@ -52,7 +70,7 @@ export async function createScene(container: HTMLElement, meta: Json, onPick: (p
       }),
     ),
     // Cesium appends layer.json itself, so it needs the directory URL.
-    terrainProvider: await Cesium.CesiumTerrainProvider.fromUrl(meta.layers.terrain.replace(/\/layer\.json$/, "")),
+    terrainProvider: await loadTerrain(meta.layers.terrain.replace(/\/layer\.json$/, "")),
     // Render only when something changes instead of 60 times a second.
     requestRenderMode: true,
     maximumRenderTimeChange: Infinity,
@@ -174,6 +192,22 @@ export async function createScene(container: HTMLElement, meta: Json, onPick: (p
     Cesium.ScreenSpaceEventType.LEFT_CLICK,
   );
 
+  // Section cuts: one clipping plane on the buildings, the line it makes on the ground, and
+  // schematic floor plates inside the buildings it passes through.
+  const cutPlanes = new Cesium.ClippingPlaneCollection({
+    planes: [new Cesium.ClippingPlane(new Cesium.Cartesian3(1, 0, 0), 0)],
+    edgeColor: Cesium.Color.fromCssColorString("#f5a524"),
+    edgeWidth: 2,
+    enabled: false,
+  });
+  buildings.clippingPlanes = cutPlanes;
+  const cutLine = viewer.entities.add({
+    show: false,
+    polyline: { width: 3, clampToGround: true, material: Cesium.Color.fromCssColorString("#f5a524") },
+  });
+  let floorPlates: Cesium.Primitive | null = null;
+  let floorRun = 0;
+
   const ground: Partial<Record<LayerId, Cesium.GroundPrimitive>> = {};
   const water = createWater(viewer, meta.pilot);
   const zones: Partial<Record<ZoneType, Json>> = {};
@@ -206,6 +240,87 @@ export async function createScene(container: HTMLElement, meta: Json, onPick: (p
     highlight(gmlId: string | null) {
       selected = gmlId;
       repaint();
+    },
+
+    /** Slice the buildings: a vertical plane (view side removed) or a horizontal one; null restores them. */
+    setSection(cut: ({ kind: "section"; heading: number } | { kind: "plan"; level: number }) & Point | null) {
+      cutPlanes.enabled = !!cut;
+      buildings.backFaceCulling = !cut; // so the inside of a cut building can be seen
+      if (cut) {
+        const here = Cesium.Cartographic.fromDegrees(cut.lon, cut.lat);
+        const groundZ = scene.globe.getHeight(here) ?? 40;
+        const h = cut.kind === "section" ? Cesium.Math.toRadians(cut.heading) : 0;
+        const enu = Cesium.Transforms.eastNorthUpToFixedFrame(
+          Cesium.Cartesian3.fromDegrees(cut.lon, cut.lat, groundZ + (cut.kind === "plan" ? cut.level : 0)),
+        );
+        // The plane keeps what its normal points at.
+        cutPlanes.get(0).normal = cut.kind === "plan"
+          ? new Cesium.Cartesian3(0, 0, -1)
+          : new Cesium.Cartesian3(Math.cos(h), -Math.sin(h), 0);
+        const origin = (buildings as unknown as { clippingPlanesOriginMatrix: Cesium.Matrix4 }).clippingPlanesOriginMatrix;
+        cutPlanes.modelMatrix = Cesium.Matrix4.multiply(Cesium.Matrix4.inverse(origin, new Cesium.Matrix4()), enu, new Cesium.Matrix4());
+      }
+      scene.requestRender();
+    },
+
+    /** Floor plates of the buildings on the cut, and the cut's line on the ground. */
+    async setSectionFloors(cut: Json[], ends: number[][] | null) {
+      const run = ++floorRun;
+      cutLine.show = !!ends;
+      if (ends) cutLine.polyline!.positions = new Cesium.ConstantProperty(Cesium.Cartesian3.fromDegreesArray(ends.flat()));
+      const places = cut.map((b) => Cesium.Cartographic.fromDegrees(b.lon, b.lat));
+      if (places.length) {
+        // The flat fallback terrain has no availability data, which "most detailed" requires.
+        if (viewer.terrainProvider.availability) await Cesium.sampleTerrainMostDetailed(viewer.terrainProvider, places);
+        else await Cesium.sampleTerrain(viewer.terrainProvider, 12, places);
+      }
+      if (run !== floorRun) return;
+      const dry = Cesium.ColorGeometryInstanceAttribute.fromColor(Cesium.Color.fromCssColorString("#f3e3c3"));
+      const wet = Cesium.ColorGeometryInstanceAttribute.fromColor(Cesium.Color.fromCssColorString("#38bdf8"));
+      const ring = (r: number[][]) => Cesium.Cartesian3.fromDegreesArray(r.flat());
+      const instances: Cesium.GeometryInstance[] = [];
+      cut.forEach((b, n) => {
+        const polys = b.outline.type === "Polygon" ? [b.outline.coordinates] : b.outline.coordinates;
+        const storey = b.height / b.floors;
+        // ponytail: plates stop at floor 60 to keep the cut fast; thin them out if towers need the full stack
+        for (let i = 0; i < Math.min(b.floors, 60); i++) {
+          const z = places[n].height + i * storey;
+          for (const [outer, ...holes] of polys) {
+            instances.push(new Cesium.GeometryInstance({
+              geometry: new Cesium.PolygonGeometry({
+                polygonHierarchy: new Cesium.PolygonHierarchy(ring(outer), holes.map((x: number[][]) => new Cesium.PolygonHierarchy(ring(x)))),
+                height: z + 0.05, extrudedHeight: z + 0.4,
+                vertexFormat: Cesium.PerInstanceColorAppearance.FLAT_VERTEX_FORMAT,
+              }),
+              attributes: { color: i < b.wet ? wet : dry },
+            }));
+          }
+        }
+      });
+      const next = instances.length
+        ? scene.primitives.add(new Cesium.Primitive({
+            geometryInstances: instances,
+            appearance: new Cesium.PerInstanceColorAppearance({ flat: true, translucent: false }),
+            asynchronous: false,
+          }))
+        : null;
+      if (floorPlates) scene.primitives.remove(floorPlates);
+      floorPlates = next;
+      scene.requestRender();
+    },
+
+    /** Move the camera to look square-on at the cut. */
+    faceSection(at: Point, heading: number) {
+      const look = Cesium.Math.toRadians(heading + 90), back = 320;
+      viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(
+          at.lon - (back * Math.sin(look)) / (111320 * Math.cos(Cesium.Math.toRadians(at.lat))),
+          at.lat - (back * Math.cos(look)) / 110574,
+          (scene.globe.getHeight(Cesium.Cartographic.fromDegrees(at.lon, at.lat)) ?? 40) + 90,
+        ),
+        orientation: { heading: look, pitch: Cesium.Math.toRadians(-14), roll: 0 },
+        duration: 1.2,
+      });
     },
 
     /** Colour buildings by GML ID (CSS colours), or return to the plain model with null. */
