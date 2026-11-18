@@ -23,64 +23,77 @@ const TIMES: Record<Light, string> = {
   midday: "2026-10-15T12:30:00+09:00",
   sunset: "2026-10-15T16:52:00+09:00",
 };
-const LIGHTS: Record<Light, { sun: [number, number, number]; zenith: [number, number, number]; horizon: [number, number, number]; ambient: number; glow: number; shade: number; haze: [number, number, number] }> = {
-  morning: { sun: [1, 0.9, 0.78], zenith: [0.36, 0.55, 0.82], horizon: [0.92, 0.86, 0.78], ambient: 1.0, glow: 0, shade: 0.5, haze: [0.86, 0.86, 0.84] },
-  midday: { sun: [1, 0.98, 0.94], zenith: [0.32, 0.54, 0.86], horizon: [0.8, 0.88, 0.95], ambient: 1.05, glow: 0, shade: 0.45, haze: [0.72, 0.82, 0.91] },
-  sunset: { sun: [1, 0.78, 0.58], zenith: [0.34, 0.42, 0.62], horizon: [1, 0.64, 0.4], ambient: 0.85, glow: 0.8, shade: 0.66, haze: [0.95, 0.72, 0.55] },
+const LIGHTS: Record<Light, { sun: [number, number, number]; zenith: [number, number, number]; horizon: [number, number, number]; ambient: number; glow: number; shade: number }> = {
+  morning: { sun: [1, 0.9, 0.78], zenith: [0.36, 0.55, 0.82], horizon: [0.92, 0.86, 0.78], ambient: 1.0, glow: 0, shade: 0.5 },
+  midday: { sun: [1, 0.98, 0.94], zenith: [0.32, 0.54, 0.86], horizon: [0.8, 0.88, 0.95], ambient: 1.05, glow: 0, shade: 0.45 },
+  sunset: { sun: [1, 0.78, 0.58], zenith: [0.34, 0.42, 0.62], horizon: [1, 0.64, 0.4], ambient: 0.85, glow: 0.8, shade: 0.66 },
 };
-// Render distance, as in games: full detail close to the camera, less further out, nothing new
-// beyond the limit, and fog hiding the edge. Fewer tiles to fetch and draw is what keeps it smooth.
-export const RENDER_DISTANCES = { near: 1000, medium: 1800, far: 3500 };
-export type RenderDistance = keyof typeof RENDER_DISTANCES;
+// Render radius: a circle on the ground around the point the camera is looking at. Inside it the
+// city loads in full detail. Outside it stays visible at reduced detail, softly blurred.
+export const RADIUS = { min: 300, max: 3000, initial: 1200 };
+export interface RenderStatus extends Point {
+  loading: number; // tiles still being fetched or prepared
+  memoryMB: number;
+}
+const OUTSIDE_DETAIL = 0.2; // share of normal detail demand beyond the radius
 const STREAMING: Cesium.Cesium3DTileset.ConstructorOptions = {
   skipLevelOfDetail: true, baseScreenSpaceError: 1024, skipScreenSpaceErrorFactor: 16, skipLevels: 1,
   preloadFlightDestinations: false, loadSiblings: false, progressiveResolutionHeightFraction: 0,
   cullRequestsWhileMoving: true, dynamicScreenSpaceError: false,
+  foveatedScreenSpaceError: false, // it would hold tiles back for as long as the camera drifts
 };
+type RadiusTileset = { renderRadius?: number; renderFocus?: Cesium.Cartesian3 };
 // ponytail: wraps a private Cesium method (the version is pinned by package-lock). If an upgrade
-// renames it, loading simply stops being limited by distance; the fog still works.
+// renames it, detail stops following the radius; the blur and ring still work.
 const tileProto = Cesium.Cesium3DTile.prototype as unknown as {
-  getScreenSpaceError: (...args: unknown[]) => number; distanceLimited?: boolean;
+  getScreenSpaceError: (...args: unknown[]) => number; radiusLimited?: boolean;
 };
-if (tileProto.getScreenSpaceError && !tileProto.distanceLimited) {
+if (tileProto.getScreenSpaceError && !tileProto.radiusLimited) {
   const base = tileProto.getScreenSpaceError;
-  tileProto.distanceLimited = true;
-  tileProto.getScreenSpaceError = function (this: { _tileset: { renderDistance?: number }; _distanceToCamera: number }, ...args) {
-    const error = base.apply(this, args), limit = this._tileset.renderDistance;
-    if (!limit) return error;
-    const t = Cesium.Math.clamp((this._distanceToCamera - limit * 0.45) / (limit * 0.55), 0, 1);
-    return error * (1 - t * t * (3 - 2 * t)); // no error left at the limit, so nothing further is requested
+  tileProto.radiusLimited = true;
+  tileProto.getScreenSpaceError = function (this: { _tileset: RadiusTileset; boundingSphere: Cesium.BoundingSphere }, ...args) {
+    const error = base.apply(this, args), { renderRadius: r, renderFocus: f } = this._tileset;
+    if (!r || !f) return error;
+    const gap = Cesium.Cartesian3.distance(this.boundingSphere.center, f) - this.boundingSphere.radius - r;
+    const t = Cesium.Math.clamp(gap / (r * 0.25), 0, 1);
+    return error * Cesium.Math.lerp(1, OUTSIDE_DETAIL, t * t * (3 - 2 * t));
   };
 }
-const DISTANCE_FOG = `
+const RADIUS_LENS = `
 uniform sampler2D colorTexture;
 uniform sampler2D depthTexture;
-uniform float u_distance;
-uniform vec3 u_haze;
+uniform float u_radius;
+uniform vec3 u_focus;
+uniform vec3 u_up;
 in vec2 v_textureCoordinates;
-float metres(vec2 uv) {
+// Ground distance from the focus point in metres; -1 for sky.
+float fromFocus(vec2 uv) {
   float z = czm_unpackDepth(texture(depthTexture, uv));
-  if (z <= 0.0 || z >= 1.0) return -1.0; // sky
+  if (z <= 0.0 || z >= 1.0) return -1.0;
   z = czm_reverseLogDepth(z);
   float ndc = (2.0 * z - czm_depthRange.near - czm_depthRange.far) / (czm_depthRange.far - czm_depthRange.near);
   vec4 eye = czm_inverseProjection * vec4(uv * 2.0 - 1.0, ndc, 1.0);
-  return length(eye.xyz / eye.w);
+  vec3 v = eye.xyz / eye.w - u_focus;
+  return length(v - u_up * dot(v, u_up));
 }
 void main() {
   vec2 uv = v_textureCoordinates;
+  float d = fromFocus(uv);
+  float amount = d < 0.0 ? 1.0 : smoothstep(u_radius * 0.96, u_radius * 1.3, d);
   vec4 c = texture(colorTexture, uv);
-  float d = metres(uv);
-  if (d > 0.0) {
-    float soft = smoothstep(u_distance * 0.55, u_distance, d);
-    if (soft > 0.01) { // a light six-tap blur where detail starts to drop
-      vec4 sum = c;
-      for (int i = 0; i < 6; i++) {
-        float a = float(i) * 1.0472;
-        sum += texture(colorTexture, uv + vec2(cos(a), sin(a)) * soft * 2.0 * czm_pixelRatio / czm_viewport.zw);
-      }
-      c = sum / 7.0;
+  if (amount > 0.004) {
+    vec4 sum = c;
+    for (int i = 1; i <= 16; i++) {
+      float a = float(i) * 2.39996, r = sqrt(float(i) / 16.0);
+      sum += texture(colorTexture, uv + vec2(cos(a), sin(a)) * r * amount * 7.0 * czm_pixelRatio / czm_viewport.zw);
     }
-    c.rgb = mix(c.rgb, u_haze, smoothstep(u_distance * 0.7, u_distance * 1.2, d));
+    c = sum / 17.0;
+  }
+  if (d >= 0.0) {
+    float grey = dot(c.rgb, vec3(0.3, 0.59, 0.11));
+    c.rgb = mix(c.rgb, vec3(grey), amount * 0.18) * (1.0 - amount * 0.16);
+    float width = clamp(fwidth(d) * 1.3, 0.6, u_radius * 0.012);
+    c.rgb = mix(c.rgb, vec3(1.0), 0.72 * (1.0 - smoothstep(0.0, width, abs(d - u_radius))));
   }
   out_FragColor = c;
 }`;
@@ -240,7 +253,8 @@ async function loadPhotoreal() {
   }
 }
 
-export async function createEstate(container: HTMLElement, tiles: Json, onPick: (id: string | null, at: Point | null) => void) {
+export async function createEstate(container: HTMLElement, tiles: Json, onPick: (id: string | null, at: Point | null) => void,
+                                   onStatus: (s: RenderStatus) => void) {
   const google = await loadPhotoreal();
   const viewer = new Cesium.Viewer(container, {
     ...(google ? { globe: false as const, baseLayer: false as const, skyBox: false as const, skyAtmosphere: new Cesium.SkyAtmosphere() } : {
@@ -285,11 +299,16 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     scene.shadowMap.maximumDistance = 2200;
   }
   scene.postProcessStages.fxaa.enabled = true;
-  let chosenDistance = RENDER_DISTANCES.medium, quality = 1, shotRange = 0, limit = chosenDistance;
-  let haze = new Cesium.Cartesian3(0.72, 0.82, 0.91);
+  let radius = RADIUS.initial;
+  const focus = Cesium.Cartesian3.fromDegrees(139.8187, 35.7166, GROUND);
+  const focusEye = new Cesium.Cartesian3(), upEye = new Cesium.Cartesian3();
   scene.postProcessStages.add(new Cesium.PostProcessStage({
-    fragmentShader: DISTANCE_FOG,
-    uniforms: { u_distance: () => limit, u_haze: () => haze },
+    fragmentShader: RADIUS_LENS,
+    uniforms: {
+      u_radius: () => radius,
+      u_focus: () => Cesium.Matrix4.multiplyByPoint(camera.viewMatrix, focus, focusEye),
+      u_up: () => Cesium.Matrix4.multiplyByPointAsVector(camera.viewMatrix, Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(focus), upEye),
+    },
   }));
 
   const OPTIONS: Cesium.Cesium3DTileset.ConstructorOptions = {
@@ -368,9 +387,8 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   // Keep movement smooth: if the device can't hold about 28 frames a second, step quality down.
   if (!location.search.includes("quality=high")) {
     const steps = [
-      () => { quality = 0.75; },
       () => { viewer.resolutionScale = Math.min(viewer.resolutionScale, 1); scene.shadowMap.size = 2048; },
-      () => { viewer.resolutionScale = 0.8; scene.msaaSamples = 1; quality = 0.55; },
+      () => { viewer.resolutionScale = 0.8; scene.msaaSamples = 1; },
       () => { if (!google) { viewer.shadows = false; viewer.terrainShadows = Cesium.ShadowMode.DISABLED; } },
     ];
     let frames = 0, since = performance.now(), slow = 0;
@@ -386,11 +404,24 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     });
   }
 
-  // The limit eases towards its target, widening for high or far-away viewpoints so they never sit in fog.
+  // The circle follows the ground point at the centre of the view. The radius itself is only ever the visitor's.
+  const groundLevel = new Cesium.Ellipsoid(Cesium.Ellipsoid.WGS84.radii.x + GROUND, Cesium.Ellipsoid.WGS84.radii.y + GROUND, Cesium.Ellipsoid.WGS84.radii.z + GROUND);
+  const active = google ?? buildings;
+  let loading = 0, lastStatus = 0;
+  active.loadProgress.addEventListener((pending: number, processing: number) => { loading = pending + processing; });
   scene.preRender.addEventListener(() => {
-    const height = Math.max(camera.positionCartographic.height - GROUND, 0);
-    limit += (Math.max(chosenDistance * quality, shotRange, height * 2.4) - limit) * 0.05;
-    for (const t of [google, buildings]) if (t) (t as unknown as { renderDistance: number }).renderDistance = limit;
+    const span = Cesium.IntersectionTests.rayEllipsoid(new Cesium.Ray(camera.positionWC, camera.directionWC), groundLevel);
+    if (span && span.start < 8000) {
+      const hit = Cesium.Cartesian3.add(camera.positionWC, Cesium.Cartesian3.multiplyByScalar(camera.directionWC, span.start, new Cesium.Cartesian3()), new Cesium.Cartesian3());
+      Cesium.Cartesian3.lerp(focus, hit, 0.12, focus);
+    }
+    for (const t of [google, buildings] as unknown as (RadiusTileset | null)[]) if (t) { t.renderRadius = radius; t.renderFocus = focus; }
+    const now = performance.now();
+    if (now - lastStatus > 500) {
+      lastStatus = now;
+      const c = Cesium.Cartographic.fromCartesian(focus);
+      onStatus({ lon: Cesium.Math.toDegrees(c.longitude), lat: Cesium.Math.toDegrees(c.latitude), loading, memoryMB: active.totalMemoryUsageInBytes / 1e6 });
+    }
   });
 
   let matches = new Set<string>();
@@ -439,7 +470,6 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     /** Glide to a viewpoint. With `drift`, keep circling it slowly until the visitor takes over. */
     go(s: Shot, seconds = 3.2, drift = false) {
       stopOrbit();
-      shotRange = s.range * 1.35;
       const target = Cesium.Cartesian3.fromDegrees(s.lon, s.lat, GROUND + s.z);
       camera.flyToBoundingSphere(new Cesium.BoundingSphere(target, 1), {
         offset: new Cesium.HeadingPitchRange(Cesium.Math.toRadians(s.heading), Cesium.Math.toRadians(s.pitch), s.range),
@@ -450,14 +480,13 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
       });
     },
 
-    setRenderDistance(d: RenderDistance) {
-      chosenDistance = RENDER_DISTANCES[d];
+    setRadius(metres: number) {
+      radius = metres;
     },
 
     setLight(light: Light) {
       viewer.clock.currentTime = Cesium.JulianDate.fromIso8601(TIMES[light]);
       const l = LIGHTS[light];
-      haze = new Cesium.Cartesian3(...l.haze);
       if (google) return; // its daylight is part of the photographs
       scene.light = new Cesium.SunLight({ color: new Cesium.Color(...l.sun), intensity: light === "sunset" ? 2.4 : 2 });
       scene.shadowMap.darkness = l.shade;

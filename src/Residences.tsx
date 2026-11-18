@@ -2,7 +2,7 @@
 // walking times are real; open data has no listings, so prices are labelled estimates.
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Json } from "./api";
-import { createEstate, type Estate, type Light, type RenderDistance, type Shot } from "./estateScene";
+import { createEstate, RADIUS, type Estate, type Light, type RenderStatus, type Shot } from "./estateScene";
 
 // Assumptions behind the estimate (calibration knobs).
 const BUILD_COST = 450_000; // yen per m² of floor built
@@ -73,7 +73,8 @@ export default function Residences() {
   const [chosen, setChosen] = useState<string | null>(null);
   const [sources, setSources] = useState(false);
   const [photoreal, setPhotoreal] = useState(false);
-  const [distance, setDistance] = useState<RenderDistance>("medium");
+  const [radius, setRadius] = useState(RADIUS.initial);
+  const [status, setStatus] = useState<RenderStatus | null>(null);
   const homesRef = useRef<Home[]>([]);
   const [category, setCategory] = useState("parks");
   const [minArea, setMinArea] = useState(50), [maxArea, setMaxArea] = useState(100);
@@ -109,7 +110,7 @@ export default function Residences() {
           // On the photographic city only search results are pickable, so find the building at the spot clicked.
           const near = !id && at ? homesRef.current.reduce<Home | null>((best, h) => (metres(h, at) < 35 && (!best || metres(h, at) < metres(best, at)) ? h : best), null) : null;
           setChosen(id ?? near?.id ?? null);
-        });
+        }, setStatus);
         if (dead) return e.destroy();
         estate.current = e;
         setPhotoreal(e.photoreal);
@@ -124,7 +125,7 @@ export default function Residences() {
   }, []);
 
   useEffect(() => { if (ready) estate.current?.setLight(light); }, [ready, light]);
-  useEffect(() => { if (ready) estate.current?.setRenderDistance(distance); }, [ready, distance]);
+  useEffect(() => { if (ready) estate.current?.setRadius(radius); }, [ready, radius]);
   useEffect(() => {
     if (ready) estate.current?.setMatches(tab === "Home" ? new Set(results.map((h) => h.id)) : new Set(), chosen);
   }, [ready, results, chosen, tab]);
@@ -161,6 +162,7 @@ export default function Residences() {
     if (ready && tab === "Amenities") estate.current?.go({ ...focus, z: 0, heading: 0, pitch: -58, range: 1250 }, 2.4);
   }, [category]);
 
+  const inRadius = useMemo(() => (status ? homes.filter((h) => metres(h, status) <= radius).length : 0), [homes, status, radius]);
   const panel = "pointer-events-auto border border-white/15 bg-[#14120f]/70 text-white shadow-[0_18px_60px_rgba(0,0,0,0.35)] backdrop-blur-xl";
   return (
     <div className="relative h-full overflow-hidden bg-[#14120f] text-[13px] leading-5 text-white">
@@ -178,12 +180,7 @@ export default function Residences() {
 
       <header className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center gap-4 px-4 pt-4 sm:px-8 sm:pt-6">
         <div className="text-[15px] font-light tracking-[0.3em]">SUMIDA</div>
-        <label className="pointer-events-auto ml-auto flex items-center gap-1.5 text-xs text-white/70">
-          <span className="hidden sm:inline">Render distance</span>
-          <select aria-label="Render distance" className="border-0 bg-transparent py-1 text-xs text-white outline-none" value={distance} onChange={(e) => setDistance(e.target.value as RenderDistance)}>
-            <option value="near">Near</option><option value="medium">Medium</option><option value="far">Far</option>
-          </select>
-        </label>
+        <div className="ml-auto" />
         <div className={`pointer-events-auto flex items-center gap-1 ${photoreal ? "hidden" : ""}`} role="group" aria-label="Time of day">
           {TIMES.map(([id, label]) => (
             <button key={id} aria-pressed={light === id} onClick={() => setLight(id)} className={`px-2 py-1 text-xs transition-colors ${light === id ? "text-white" : "text-white/55 hover:text-white"}`}>{label}</button>
@@ -295,6 +292,19 @@ export default function Residences() {
                 </ol>
               </>
             )}
+          </div>
+          <div className="sticky bottom-[41px] border-t border-white/15 bg-[#14120f]/90 px-4 py-2">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+              <label className="flex min-w-56 flex-1 items-center gap-3">
+                <span className={eyebrow}>Render radius</span>
+                <input type="range" className="min-w-0 flex-1" aria-label="Render radius in metres" min={RADIUS.min} max={RADIUS.max} step={50}
+                       value={radius} onChange={(e) => setRadius(Number(e.target.value))} />
+                <span className="w-14 text-right tabular-nums">{radius >= 1000 ? `${(radius / 1000).toFixed(2)} km` : `${radius} m`}</span>
+              </label>
+              <p className="tabular-nums text-white/60" aria-live="off">
+                {(Math.PI * radius * radius / 1e6).toFixed(1)} km² sharp · {inRadius} apartment buildings inside · {status?.loading ? `loading ${status.loading} tiles` : "loaded"} · {Math.round(status?.memoryMB ?? 0)} MB
+              </p>
+            </div>
           </div>
           <nav className="sticky bottom-0 flex border-t border-white/15 bg-[#14120f]/80" aria-label="Sections">
             {NAV.map((t) => (
