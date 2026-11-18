@@ -34,10 +34,31 @@ export const RADIUS = { min: 300, max: 3000, initial: 1200 };
 export interface RenderStatus extends Point {
   loading: number; // tiles still being fetched or prepared
   memoryMB: number;
+  height: number; // camera height above ground, metres
+  lod: number[]; // tiles drawn in each LOD ring
+  levels: [number, number] | null; // shallowest and deepest level of the HLOD tree being drawn
 }
-const OUTSIDE_DETAIL = 0.2; // share of normal detail demand beyond the radius
+// LOD rings: distance beyond the radius (as a share of it) and the detail demanded there.
+const LOD_RINGS: [number, number][] = [[0, 1], [0.25, 0.5], [0.75, 0.25], [1.5, 0.12]];
+function ringDetail(gap: number) {
+  if (gap <= 0) return 1;
+  for (let i = 1; i < LOD_RINGS.length; i++) {
+    const [a, da] = LOD_RINGS[i - 1], [b, db] = LOD_RINGS[i];
+    if (gap < b) return Cesium.Math.lerp(da, db, (gap - a) / (b - a));
+  }
+  return LOD_RINGS[LOD_RINGS.length - 1][1];
+}
+const ringOf = (gap: number) => (gap <= 0 ? 0 : gap < 0.25 ? 1 : gap < 0.75 ? 2 : 3);
+const treeLevels = new WeakMap<object, number>();
+function treeLevel(tile: Cesium.Cesium3DTile): number {
+  let n = treeLevels.get(tile);
+  if (n === undefined) treeLevels.set(tile, (n = tile.parent ? treeLevel(tile.parent) + 1 : 0));
+  return n;
+}
 const STREAMING: Cesium.Cesium3DTileset.ConstructorOptions = {
-  skipLevelOfDetail: true, baseScreenSpaceError: 1024, skipScreenSpaceErrorFactor: 16, skipLevels: 1,
+  // Hierarchical LOD: walk the tile tree level by level, and keep a parent on screen until its
+  // children are ready, so detail refines in place and no holes or stray shards appear.
+  skipLevelOfDetail: false,
   preloadFlightDestinations: false, loadSiblings: false, progressiveResolutionHeightFraction: 0,
   cullRequestsWhileMoving: true, dynamicScreenSpaceError: false,
   foveatedScreenSpaceError: false, // it would hold tiles back for as long as the camera drifts
@@ -55,8 +76,7 @@ if (tileProto.getScreenSpaceError && !tileProto.radiusLimited) {
     const error = base.apply(this, args), { renderRadius: r, renderFocus: f } = this._tileset;
     if (!r || !f) return error;
     const gap = Cesium.Cartesian3.distance(this.boundingSphere.center, f) - this.boundingSphere.radius - r;
-    const t = Cesium.Math.clamp(gap / (r * 0.25), 0, 1);
-    return error * Cesium.Math.lerp(1, OUTSIDE_DETAIL, t * t * (3 - 2 * t));
+    return error * ringDetail(gap / r);
   };
 }
 const RADIUS_LENS = `
@@ -92,8 +112,8 @@ void main() {
   if (d >= 0.0) {
     float grey = dot(c.rgb, vec3(0.3, 0.59, 0.11));
     c.rgb = mix(c.rgb, vec3(grey), amount * 0.18) * (1.0 - amount * 0.16);
-    float width = clamp(fwidth(d) * 1.3, 0.6, u_radius * 0.012);
-    c.rgb = mix(c.rgb, vec3(1.0), 0.72 * (1.0 - smoothstep(0.0, width, abs(d - u_radius))));
+    float width = clamp(fwidth(d) * 2.2, 1.0, u_radius * 0.02);
+    c.rgb = mix(c.rgb, vec3(1.0), 0.85 * (1.0 - smoothstep(0.0, width, abs(d - u_radius))));
   }
   out_FragColor = c;
 }`;
@@ -281,8 +301,8 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     Object.assign(credits.style, { position: "absolute", top: "52px", left: "16px", bottom: "auto", zIndex: "5" });
     scene.primitives.add(google);
     scene.backgroundColor = Cesium.Color.fromCssColorString("#a9cbe8"); // daylight behind the thin edge of the atmosphere
-    // Google's mesh is built for aerial views: stop the camera going into it.
-    scene.screenSpaceCameraController.minimumZoomDistance = 120;
+    // Without a globe this is height above the ellipsoid: about 5 m above Sumida's ground.
+    scene.screenSpaceCameraController.minimumZoomDistance = GROUND + 5;
   } else {
     credits.style.display = "none"; // credited under Sources
     viewer.imageryLayers.get(0).brightness = 1.12;
@@ -408,6 +428,14 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   const groundLevel = new Cesium.Ellipsoid(Cesium.Ellipsoid.WGS84.radii.x + GROUND, Cesium.Ellipsoid.WGS84.radii.y + GROUND, Cesium.Ellipsoid.WGS84.radii.z + GROUND);
   const active = google ?? buildings;
   let loading = 0, lastStatus = 0;
+  let rings = [0, 0, 0, 0], shallow = Infinity, deep = -1;
+  active.tileVisible.addEventListener((tile: Cesium.Cesium3DTile) => {
+    const b = tile.boundingSphere, gap = (Cesium.Cartesian3.distance(b.center, focus) - b.radius - radius) / radius;
+    rings[ringOf(gap)]++;
+    const level = treeLevel(tile);
+    if (level < shallow) shallow = level;
+    if (level > deep) deep = level;
+  });
   active.loadProgress.addEventListener((pending: number, processing: number) => { loading = pending + processing; });
   scene.preRender.addEventListener(() => {
     const span = Cesium.IntersectionTests.rayEllipsoid(new Cesium.Ray(camera.positionWC, camera.directionWC), groundLevel);
@@ -420,8 +448,10 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     if (now - lastStatus > 500) {
       lastStatus = now;
       const c = Cesium.Cartographic.fromCartesian(focus);
-      onStatus({ lon: Cesium.Math.toDegrees(c.longitude), lat: Cesium.Math.toDegrees(c.latitude), loading, memoryMB: active.totalMemoryUsageInBytes / 1e6 });
+      onStatus({ lon: Cesium.Math.toDegrees(c.longitude), lat: Cesium.Math.toDegrees(c.latitude), loading, memoryMB: active.totalMemoryUsageInBytes / 1e6,
+                 height: camera.positionCartographic.height - GROUND, lod: rings, levels: deep >= 0 ? [shallow, deep] : null });
     }
+    rings = [0, 0, 0, 0]; shallow = Infinity; deep = -1; // counted afresh for each frame
   });
 
   let matches = new Set<string>();
@@ -445,14 +475,44 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   let pins: Cesium.Entity[] = [];
   let orbit: Cesium.Cartesian3 | null = null;
   const stopOrbit = () => { orbit = null; };
+  // Any input hands the camera straight to the visitor, even in the middle of a flight.
+  const takeOver = () => { orbit = null; camera.cancelFlight(); };
+  const controls = scene.screenSpaceCameraController;
+  controls.zoomEventTypes = [Cesium.CameraEventType.WHEEL, Cesium.CameraEventType.PINCH];
+  controls.tiltEventTypes = [Cesium.CameraEventType.RIGHT_DRAG, Cesium.CameraEventType.MIDDLE_DRAG, Cesium.CameraEventType.PINCH,
+    { eventType: Cesium.CameraEventType.LEFT_DRAG, modifier: Cesium.KeyboardEventModifier.CTRL }];
+  // Keyboard flying: WASD or arrows to move, Q and E for down and up, Shift for speed.
+  const held = new Set<string>();
+  const typing = (e: KeyboardEvent) => e.target instanceof HTMLElement && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName);
+  addEventListener("keydown", (e) => {
+    if (typing(e) || e.metaKey || e.ctrlKey || !/^(Key[WASDQE]|Arrow(Up|Down|Left|Right))$/.test(e.code)) { if (e.key === "Shift") held.add("Shift"); return; }
+    held.add(e.code); takeOver(); e.preventDefault();
+  });
+  addEventListener("keyup", (e) => { held.delete(e.code); if (e.key === "Shift") held.delete("Shift"); });
+  addEventListener("blur", () => held.clear());
+  let lastMove = performance.now();
   scene.preUpdate.addEventListener(() => {
+    const now = performance.now(), dt = Math.min((now - lastMove) / 1000, 0.1);
+    lastMove = now;
+    if (held.size) {
+      const up = Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(camera.positionWC);
+      const flat = (v: Cesium.Cartesian3) => Cesium.Cartesian3.normalize(Cesium.Cartesian3.subtract(v, Cesium.Cartesian3.multiplyByScalar(up, Cesium.Cartesian3.dot(v, up), new Cesium.Cartesian3()), new Cesium.Cartesian3()), new Cesium.Cartesian3());
+      const speed = Cesium.Math.clamp((camera.positionCartographic.height - GROUND) * 0.7, 15, 700) * (held.has("Shift") ? 3 : 1) * dt;
+      const on = (...c: string[]) => c.some((k) => held.has(k));
+      if (on("KeyW", "ArrowUp")) camera.move(flat(camera.directionWC), speed);
+      if (on("KeyS", "ArrowDown")) camera.move(flat(camera.directionWC), -speed);
+      if (on("KeyD", "ArrowRight")) camera.move(flat(camera.rightWC), speed);
+      if (on("KeyA", "ArrowLeft")) camera.move(flat(camera.rightWC), -speed);
+      if (on("KeyE")) camera.move(up, speed);
+      if (on("KeyQ")) camera.move(up, -Math.min(speed, Math.max(camera.positionCartographic.height - GROUND - 5, 0)));
+    }
     if (!orbit) return;
     camera.lookAtTransform(Cesium.Transforms.eastNorthUpToFixedFrame(orbit));
     camera.rotateRight(0.00035);
     camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
   });
   const canvas = scene.canvas;
-  for (const type of ["pointerdown", "wheel", "touchstart"]) canvas.addEventListener(type, stopOrbit, { passive: true });
+  for (const type of ["pointerdown", "wheel", "touchstart"]) canvas.addEventListener(type, takeOver, { passive: true, capture: true });
 
   new Cesium.ScreenSpaceEventHandler(canvas).setInputAction((e: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     const hit = scene.pick(e.position);
@@ -482,6 +542,11 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
 
     setRadius(metres: number) {
       radius = metres;
+    },
+
+    /** Tint each tile, to see how the hierarchy has divided the city. */
+    showTiles(on: boolean) {
+      active.debugColorizeTiles = on;
     },
 
     setLight(light: Light) {

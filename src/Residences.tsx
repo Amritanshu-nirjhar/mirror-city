@@ -75,6 +75,8 @@ export default function Residences() {
   const [photoreal, setPhotoreal] = useState(false);
   const [radius, setRadius] = useState(RADIUS.initial);
   const [status, setStatus] = useState<RenderStatus | null>(null);
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [showTiles, setShowTiles] = useState(false);
   const homesRef = useRef<Home[]>([]);
   const [category, setCategory] = useState("parks");
   const [minArea, setMinArea] = useState(50), [maxArea, setMaxArea] = useState(100);
@@ -126,6 +128,7 @@ export default function Residences() {
 
   useEffect(() => { if (ready) estate.current?.setLight(light); }, [ready, light]);
   useEffect(() => { if (ready) estate.current?.setRadius(radius); }, [ready, radius]);
+  useEffect(() => { if (ready) estate.current?.showTiles(showTiles); }, [ready, showTiles]);
   useEffect(() => {
     if (ready) estate.current?.setMatches(tab === "Home" ? new Set(results.map((h) => h.id)) : new Set(), chosen);
   }, [ready, results, chosen, tab]);
@@ -148,6 +151,7 @@ export default function Residences() {
   }
   function openTab(t: Tab) {
     setTab(t);
+    setPanelOpen(true);
     setShot(null);
     if (t === "Home") fly(HOME, null, true);
     if (t === "Gallery") fly(GALLERY[1].shot, GALLERY[1].name);
@@ -223,7 +227,7 @@ export default function Residences() {
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center p-3 sm:p-6">
         <section className={`${panel} max-h-[52vh] w-full max-w-5xl overflow-y-auto`}>
-          <div key={tab} className="rise p-4">
+          {panelOpen && <div key={tab} className="rise p-4">
             {tab === "Home" && (
               <>
                 <div className="flex flex-wrap items-baseline justify-between gap-x-4">
@@ -292,7 +296,7 @@ export default function Residences() {
                 </ol>
               </>
             )}
-          </div>
+          </div>}
           <div className="sticky bottom-[41px] border-t border-white/15 bg-[#14120f]/90 px-4 py-2">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
               <label className="flex min-w-56 flex-1 items-center gap-3">
@@ -301,9 +305,14 @@ export default function Residences() {
                        value={radius} onChange={(e) => setRadius(Number(e.target.value))} />
                 <span className="w-14 text-right tabular-nums">{radius >= 1000 ? `${(radius / 1000).toFixed(2)} km` : `${radius} m`}</span>
               </label>
-              <p className="tabular-nums text-white/60" aria-live="off">
-                {(Math.PI * radius * radius / 1e6).toFixed(1)} km² sharp · {inRadius} apartment buildings inside · {status?.loading ? `loading ${status.loading} tiles` : "loaded"} · {Math.round(status?.memoryMB ?? 0)} MB
+              <button className="text-white/70 hover:text-white" aria-pressed={showTiles} onClick={() => setShowTiles(!showTiles)}>{showTiles ? "Hide tiles" : "Show tiles"}</button>
+              <button className="text-white/70 hover:text-white" aria-expanded={panelOpen} onClick={() => setPanelOpen(!panelOpen)}>{panelOpen ? "Hide panel" : "Show panel"}</button>
+              <p className="w-full tabular-nums text-white/60" aria-live="off">
+                {(Math.PI * radius * radius / 1e6).toFixed(1)} km² sharp · {inRadius} apartment buildings · camera {Math.round(status?.height ?? 0).toLocaleString("en")} m ·{" "}
+                LOD 0–3: {(status?.lod ?? [0, 0, 0, 0]).join(" / ")} tiles{status?.levels && ` · HLOD levels ${status.levels[0]}–${status.levels[1]}`} ·{" "}
+                {status?.loading ? `loading ${status.loading}` : "loaded"} · {Math.round(status?.memoryMB ?? 0)} MB
               </p>
+              <p className="w-full text-[11px] text-white/45">Drag to move · right-drag to tilt and turn · scroll to zoom where you point · WASD and Q/E to fly, Shift for speed</p>
             </div>
           </div>
           <nav className="sticky bottom-0 flex border-t border-white/15 bg-[#14120f]/80" aria-label="Sections">
