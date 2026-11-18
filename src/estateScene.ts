@@ -358,6 +358,9 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     // Google's attribution must stay visible; the search panel covers the default corner.
     // ion's terms require its logo while ion serves the tiles; a direct Google key does not use ion.
     if (photo?.direct) (credits.querySelector(".cesium-credit-logoContainer") as HTMLElement | null)?.style.setProperty("display", "none");
+    // These containers must not sit over the canvas and swallow drags and scrolling.
+    (viewer.bottomContainer as HTMLElement).style.pointerEvents = "none";
+    credits.style.pointerEvents = "none";
     Object.assign(credits.style, { position: "absolute", top: "52px", left: "16px", bottom: "auto", zIndex: "5" });
     scene.primitives.add(google);
     scene.backgroundColor = Cesium.Color.fromCssColorString("#a9cbe8"); // daylight behind the thin edge of the atmosphere

@@ -32,3 +32,6 @@ button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible
   .rise, .shake { animation: none; }
   * { transition-duration: 0s !important; }
 }
+
+/* The credit strip lets input through to the map; its links stay clickable. */
+.cesium-widget-credits a, .cesium-credit-expand-link { pointer-events: auto; }
