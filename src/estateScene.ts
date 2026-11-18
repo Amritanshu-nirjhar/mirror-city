@@ -28,6 +28,34 @@ const LIGHTS: Record<Light, { sun: [number, number, number]; zenith: [number, nu
   midday: { sun: [1, 0.98, 0.94], zenith: [0.32, 0.54, 0.86], horizon: [0.8, 0.88, 0.95], ambient: 1.05, glow: 0, shade: 0.45 },
   sunset: { sun: [1, 0.78, 0.58], zenith: [0.34, 0.42, 0.62], horizon: [1, 0.64, 0.4], ambient: 0.85, glow: 0.8, shade: 0.66 },
 };
+// Focused loading: only the middle of the view gets full detail. Edge tiles wait until the camera
+// turns towards them, so nothing off-centre is fetched at full quality.
+const FOCUS: Cesium.Cesium3DTileset.ConstructorOptions = {
+  skipLevelOfDetail: true, baseScreenSpaceError: 1024, skipScreenSpaceErrorFactor: 16, skipLevels: 1,
+  foveatedScreenSpaceError: true, foveatedConeSize: 0.36, foveatedMinimumScreenSpaceErrorRelaxation: 0,
+  foveatedTimeDelay: 86400, // effectively never: stopping the camera does not fill in the edges
+  progressiveResolutionHeightFraction: 0, preloadFlightDestinations: false, loadSiblings: false,
+};
+// Soft blur matched to that area, so the lower-detail edges read as depth of focus.
+const EDGE_BLUR = `
+uniform sampler2D colorTexture;
+in vec2 v_textureCoordinates;
+void main() {
+  vec2 uv = v_textureCoordinates;
+  vec2 size = czm_viewport.zw;
+  float r = length((uv - 0.5) * vec2(size.x / size.y, 1.0));
+  float amount = smoothstep(0.3, 0.72, r);
+  vec4 c = texture(colorTexture, uv);
+  if (amount > 0.004) {
+    vec4 sum = c;
+    for (int i = 1; i <= 12; i++) {
+      float a = float(i) * 2.39996, d = sqrt(float(i) / 12.0);
+      sum += texture(colorTexture, uv + vec2(cos(a), sin(a)) * d * amount * 5.5 * czm_pixelRatio / size);
+    }
+    c = sum / 13.0;
+  }
+  out_FragColor = c;
+}`;
 const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 // PLATEAU has photo textures for only some buildings. The rest get a drawn exterior: each building
@@ -175,7 +203,7 @@ async function loadPhotoreal() {
   Cesium.Ion.defaultAccessToken = token;
   try {
     return await Cesium.createGooglePhotorealistic3DTileset(undefined, {
-      showCreditsOnScreen: true, maximumScreenSpaceError: 12, dynamicScreenSpaceError: true, preloadFlightDestinations: true,
+      ...FOCUS, showCreditsOnScreen: true, maximumScreenSpaceError: 12, dynamicScreenSpaceError: true,
       cacheBytes: 768 * 1024 * 1024, maximumCacheOverflowBytes: 512 * 1024 * 1024,
     });
   } catch (e) {
@@ -229,14 +257,13 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     scene.shadowMap.maximumDistance = 2200;
   }
   scene.postProcessStages.fxaa.enabled = true;
+  scene.postProcessStages.add(new Cesium.PostProcessStage({ fragmentShader: EDGE_BLUR }));
 
   const OPTIONS: Cesium.Cesium3DTileset.ConstructorOptions = {
     maximumScreenSpaceError: 16, dynamicScreenSpaceError: true,
     shadows: Cesium.ShadowMode.ENABLED,
-    preloadFlightDestinations: true, loadSiblings: true, cullRequestsWhileMoving: false,
-    progressiveResolutionHeightFraction: 0.5, // something sharp-enough appears first, then refines
+    ...FOCUS, cullRequestsWhileMoving: false,
     cacheBytes: 512 * 1024 * 1024, maximumCacheOverflowBytes: 256 * 1024 * 1024,
-    foveatedScreenSpaceError: true, skipLevelOfDetail: true,
   };
   let textured = true;
   let buildings: Cesium.Cesium3DTileset;
