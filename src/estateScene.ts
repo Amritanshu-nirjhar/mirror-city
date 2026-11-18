@@ -167,37 +167,63 @@ function river() {
   });
 }
 
-export async function createEstate(container: HTMLElement, tiles: Json, onPick: (id: string | null) => void) {
+/** Google's photorealistic city through Cesium ion, when a token is configured; otherwise null. */
+async function loadPhotoreal() {
+  const token = import.meta.env.VITE_CESIUM_ION_TOKEN as string | undefined;
+  if (!token) return null;
+  Cesium.Ion.defaultAccessToken = token;
+  try {
+    return await Cesium.createGooglePhotorealistic3DTileset(undefined, {
+      showCreditsOnScreen: true, maximumScreenSpaceError: 12, dynamicScreenSpaceError: true, preloadFlightDestinations: true,
+      cacheBytes: 768 * 1024 * 1024, maximumCacheOverflowBytes: 512 * 1024 * 1024,
+    });
+  } catch (e) {
+    console.warn("Photorealistic tiles unavailable, using the PLATEAU city:", e);
+    return null;
+  }
+}
+
+export async function createEstate(container: HTMLElement, tiles: Json, onPick: (id: string | null, at: Point | null) => void) {
+  const google = await loadPhotoreal();
   const viewer = new Cesium.Viewer(container, {
-    baseLayer: new Cesium.ImageryLayer(new Cesium.UrlTemplateImageryProvider({
-      url: "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg",
-      minimumLevel: 2, maximumLevel: 18,
-      credit: new Cesium.Credit("GSI seamless aerial photo"),
-    })),
-    terrainProvider: await loadTerrain(tiles.terrain.replace(/\/layer\.json$/, "")),
-    shadows: true,
-    terrainShadows: Cesium.ShadowMode.RECEIVE_ONLY,
+    ...(google ? { globe: false as const, baseLayer: false as const } : {
+      baseLayer: new Cesium.ImageryLayer(new Cesium.UrlTemplateImageryProvider({
+        url: "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg",
+        minimumLevel: 2, maximumLevel: 18,
+        credit: new Cesium.Credit("GSI seamless aerial photo"),
+      })),
+      terrainProvider: await loadTerrain(tiles.terrain.replace(/\/layer\.json$/, "")),
+      shadows: true,
+      terrainShadows: Cesium.ShadowMode.RECEIVE_ONLY,
+    }),
     msaaSamples: 4,
     animation: false, timeline: false, baseLayerPicker: false, geocoder: false, homeButton: false,
     sceneModePicker: false, navigationHelpButton: false, fullscreenButton: false, infoBox: false, selectionIndicator: false,
   });
   const { scene, camera } = viewer;
-  (viewer.cesiumWidget.creditContainer as HTMLElement).style.display = "none"; // credited under Sources
-  viewer.imageryLayers.get(0).brightness = 1.12;
-  viewer.imageryLayers.get(0).saturation = 1.2;
   viewer.clock.shouldAnimate = false;
-  scene.globe.enableLighting = true;
-  scene.globe.depthTestAgainstTerrain = true;
-  scene.globe.maximumScreenSpaceError = 1.6;
-  scene.shadowMap.softShadows = true;
-  scene.shadowMap.size = 4096;
-  // Flat LOD2 roofs speckle at the default bias.
-  const bias = (scene.shadowMap as unknown as { _primitiveBias?: { depthBias: number; normalOffsetScale: number } })._primitiveBias;
-  if (bias) { bias.depthBias = 0.0009; bias.normalOffsetScale = 0.35; }
   viewer.useBrowserRecommendedResolution = false;
   viewer.resolutionScale = Math.min(devicePixelRatio, 1.5);
-  scene.shadowMap.darkness = 0.42;
-  scene.shadowMap.maximumDistance = 2200;
+  const credits = viewer.cesiumWidget.creditContainer as HTMLElement;
+  if (google) {
+    // Google's attribution must stay visible; the search panel covers the default corner.
+    Object.assign(credits.style, { position: "absolute", top: "52px", left: "16px", bottom: "auto", zIndex: "5" });
+    scene.primitives.add(google);
+  } else {
+    credits.style.display = "none"; // credited under Sources
+    viewer.imageryLayers.get(0).brightness = 1.12;
+    viewer.imageryLayers.get(0).saturation = 1.2;
+    scene.globe.enableLighting = true;
+    scene.globe.depthTestAgainstTerrain = true;
+    scene.globe.maximumScreenSpaceError = 1.6;
+    scene.shadowMap.softShadows = true;
+    scene.shadowMap.size = 4096;
+    // Flat LOD2 roofs speckle at the default bias.
+    const bias = (scene.shadowMap as unknown as { _primitiveBias?: { depthBias: number; normalOffsetScale: number } })._primitiveBias;
+    if (bias) { bias.depthBias = 0.0009; bias.normalOffsetScale = 0.35; }
+    scene.shadowMap.darkness = 0.42;
+    scene.shadowMap.maximumDistance = 2200;
+  }
   scene.postProcessStages.fxaa.enabled = true;
 
   const OPTIONS: Cesium.Cesium3DTileset.ConstructorOptions = {
@@ -216,8 +242,9 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     textured = false;
     buildings = await Cesium.Cesium3DTileset.fromUrl(tiles.plain, OPTIONS);
   }
-  buildings.colorBlendMode = Cesium.Cesium3DTileColorBlendMode.MIX;
+  buildings.colorBlendMode = google ? Cesium.Cesium3DTileColorBlendMode.REPLACE : Cesium.Cesium3DTileColorBlendMode.MIX;
   buildings.colorBlendAmount = 0.42;
+  if (google) buildings.shadows = Cesium.ShadowMode.DISABLED;
   const origin = Cesium.Cartesian3.fromDegrees(139.815, 35.715, GROUND);
   const frame = Cesium.Transforms.eastNorthUpToFixedFrame(origin);
   const axis = (i: number) => Cesium.Cartesian3.fromCartesian4(Cesium.Matrix4.getColumn(frame, i, new Cesium.Cartesian4()));
@@ -260,26 +287,26 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     },
     fragmentShaderText: FACADE,
   });
-  buildings.customShader = facade;
+  if (!google) buildings.customShader = facade;
   // The real wards around Sumida, plain and light: the skyline in wide views.
-  for (const url of tiles.context ?? [])
+  if (!google) for (const url of tiles.context ?? [])
     Cesium.Cesium3DTileset.fromUrl(url, { maximumScreenSpaceError: 40, dynamicScreenSpaceError: true, cacheBytes: 128 * 1024 * 1024, shadows: Cesium.ShadowMode.DISABLED, skipLevelOfDetail: true })
       .then((t) => { t.customShader = facade; scene.primitives.add(t); }, (e) => console.warn("skyline unavailable:", e));
   scene.primitives.add(buildings);
   // Trees, bridges and the river are scenery: the page still works without them.
-  for (const url of [tiles.trees, tiles.bridges])
+  if (!google) for (const url of [tiles.trees, tiles.bridges])
     Cesium.Cesium3DTileset.fromUrl(url, { ...OPTIONS, maximumScreenSpaceError: 16 }).then((t) => {
       if (url === tiles.trees) t.style = new Cesium.Cesium3DTileStyle({ color: "color('#a9bb9a')" }); // calmer than the source's vivid green
       scene.primitives.add(t);
     }, (e) => console.warn("scenery unavailable:", e));
-  river().then((p) => scene.groundPrimitives.add(p), (e) => console.warn("river unavailable:", e));
+  if (!google) river().then((p) => scene.groundPrimitives.add(p), (e) => console.warn("river unavailable:", e));
 
   // Keep movement smooth: if the device can't hold about 28 frames a second, step quality down.
   if (!location.search.includes("quality=high")) {
     const steps = [
       () => { viewer.resolutionScale = Math.min(viewer.resolutionScale, 1); scene.shadowMap.size = 2048; },
       () => { viewer.resolutionScale = 0.8; scene.msaaSamples = 1; },
-      () => { viewer.shadows = false; viewer.terrainShadows = Cesium.ShadowMode.DISABLED; },
+      () => { if (!google) { viewer.shadows = false; viewer.terrainShadows = Cesium.ShadowMode.DISABLED; } },
     ];
     let frames = 0, since = performance.now(), slow = 0;
     scene.postRender.addEventListener(() => {
@@ -305,7 +332,10 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     painted.set(c, paint);
     for (let i = 0; i < c.featuresLength; i++) {
       const f = c.getFeature(i), id = f.getProperty("gml_id");
-      f.color = id === selected ? PICKED : matches.has(id) ? GOLD : WHITE;
+      if (google) { // the photographic city shows through; only search results are drawn over it
+        f.show = id === selected || matches.has(id);
+        f.color = (id === selected ? PICKED : GOLD).withAlpha(id === selected ? 0.62 : 0.42);
+      } else f.color = id === selected ? PICKED : matches.has(id) ? GOLD : WHITE;
     }
   });
 
@@ -323,11 +353,15 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
 
   new Cesium.ScreenSpaceEventHandler(canvas).setInputAction((e: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     const hit = scene.pick(e.position);
-    onPick(hit instanceof Cesium.Cesium3DTileFeature ? hit.getProperty("gml_id") ?? null : null);
+    const spot = google && scene.pickPositionSupported ? scene.pickPosition(e.position) : undefined;
+    const c = spot && Cesium.Cartographic.fromCartesian(spot);
+    onPick(hit instanceof Cesium.Cesium3DTileFeature ? hit.getProperty("gml_id") ?? null : null,
+           c ? { lon: Cesium.Math.toDegrees(c.longitude), lat: Cesium.Math.toDegrees(c.latitude) } : null);
   }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
   return {
     textured,
+    photoreal: !!google,
     destroy: () => viewer.destroy(),
 
     /** Glide to a viewpoint. With `drift`, keep circling it slowly until the visitor takes over. */
@@ -345,6 +379,7 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
 
     setLight(light: Light) {
       viewer.clock.currentTime = Cesium.JulianDate.fromIso8601(TIMES[light]);
+      if (google) return; // its daylight is part of the photographs
       const l = LIGHTS[light];
       scene.light = new Cesium.SunLight({ color: new Cesium.Color(...l.sun), intensity: light === "sunset" ? 2.4 : 2 });
       scene.shadowMap.darkness = l.shade;
@@ -364,13 +399,13 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     setPins(list: Pin[]) {
       pins.forEach((p) => viewer.entities.remove(p));
       pins = list.map((p) => viewer.entities.add({
-        position: Cesium.Cartesian3.fromDegrees(p.lon, p.lat),
+        position: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, google ? GROUND + 24 : 0),
         point: { pixelSize: 8, color: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK.withAlpha(0.5), outlineWidth: 1,
-                 heightReference: Cesium.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY },
+                 heightReference: google ? Cesium.HeightReference.NONE : Cesium.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY },
         label: { text: p.label, font: "500 12px Inter Tight, Noto Sans JP, sans-serif", fillColor: Cesium.Color.WHITE,
                  showBackground: true, backgroundColor: Cesium.Color.fromCssColorString("#15130f").withAlpha(0.72),
                  backgroundPadding: new Cesium.Cartesian2(7, 4), pixelOffset: new Cesium.Cartesian2(0, -18),
-                 heightReference: Cesium.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY },
+                 heightReference: google ? Cesium.HeightReference.NONE : Cesium.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY },
       }));
     },
   };

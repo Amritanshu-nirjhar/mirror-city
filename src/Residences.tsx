@@ -72,6 +72,8 @@ export default function Residences() {
   const [shot, setShot] = useState<string | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
   const [sources, setSources] = useState(false);
+  const [photoreal, setPhotoreal] = useState(false);
+  const homesRef = useRef<Home[]>([]);
   const [category, setCategory] = useState("parks");
   const [minArea, setMinArea] = useState(50), [maxArea, setMaxArea] = useState(100);
   const [minBudget, setMinBudget] = useState(40), [maxBudget, setMaxBudget] = useState(60);
@@ -79,6 +81,7 @@ export default function Residences() {
 
   const homes: Home[] = useMemo(() => (data?.homes ?? []).map((r: unknown[]) =>
     Object.fromEntries(data.fields.map((f: string, i: number) => [f, r[i]])) as unknown as Home), [data]);
+  homesRef.current = homes;
   const byId = useMemo(() => new Map(homes.map((h) => [h.id, h])), [homes]);
 
   const filters = useDeferredValue({ minArea, maxArea, minBudget, maxBudget, beds });
@@ -101,9 +104,14 @@ export default function Residences() {
         const d = await r.json();
         if (dead) return;
         setData(d);
-        const e = await createEstate(box.current!, d.tiles, (id) => setChosen(id));
+        const e = await createEstate(box.current!, d.tiles, (id, at) => {
+          // On the photographic city only search results are pickable, so find the building at the spot clicked.
+          const near = !id && at ? homesRef.current.reduce<Home | null>((best, h) => (metres(h, at) < 35 && (!best || metres(h, at) < metres(best, at)) ? h : best), null) : null;
+          setChosen(id ?? near?.id ?? null);
+        });
         if (dead) return e.destroy();
         estate.current = e;
+        setPhotoreal(e.photoreal);
         e.setLight("midday");
         e.go(HOME, 0, true);
         setReady(true);
@@ -163,7 +171,7 @@ export default function Residences() {
 
       <header className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center gap-4 px-4 pt-4 sm:px-8 sm:pt-6">
         <div className="text-[15px] font-light tracking-[0.3em]">SUMIDA</div>
-        <div className="pointer-events-auto ml-auto flex items-center gap-1" role="group" aria-label="Time of day">
+        <div className={`pointer-events-auto ml-auto flex items-center gap-1 ${photoreal ? "invisible" : ""}`} role="group" aria-label="Time of day">
           {TIMES.map(([id, label]) => (
             <button key={id} aria-pressed={light === id} onClick={() => setLight(id)} className={`px-2 py-1 text-xs transition-colors ${light === id ? "text-white" : "text-white/55 hover:text-white"}`}>{label}</button>
           ))}
@@ -174,6 +182,7 @@ export default function Residences() {
 
       {sources && (
         <div className={`${panel} rise absolute right-4 top-14 z-20 w-[min(22rem,calc(100%-2rem))] p-4 text-xs text-white/75 sm:right-8`}>
+          {photoreal && <p className="mb-2">3D imagery: Google, delivered through Cesium ion. PLATEAU supplies the building data behind the search.</p>}
           <p>Buildings, trees and bridges: MLIT Project PLATEAU 2025. Where PLATEAU has no wall photos, roofs use GSI aerial photos and walls are illustrative: shapes and heights are real, wall materials and windows are not. Aerial photos: GSI. Land prices: MLIT official land price survey {data?.land_year}, {data?.land_points} survey points. Amenities and walking routes: © OpenStreetMap contributors.</p>
           <p className="mt-2">No homes are listed here. Prices are estimates: nearest official land price divided by the plot's permitted floor-area ratio, plus an assumed ¥{BUILD_COST.toLocaleString("en")} per m² to build, over {NET_TO_GROSS * 100}% usable floor. Real sale prices differ.</p>
         </div>
