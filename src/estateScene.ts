@@ -358,7 +358,7 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
       shadows: true,
       terrainShadows: Cesium.ShadowMode.RECEIVE_ONLY,
     }),
-    msaaSamples: 4,
+    msaaSamples: devicePixelRatio >= 1.5 ? 1 : 4, // dense screens are smooth enough with FXAA alone
     animation: false, timeline: false, baseLayerPicker: false, geocoder: false, homeButton: false,
     sceneModePicker: false, navigationHelpButton: false, fullscreenButton: false, infoBox: false, selectionIndicator: false,
   });
@@ -401,8 +401,10 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   let shading = !!google && Cesium.PostProcessStageLibrary.isAmbientOcclusionSupported(scene);
   Object.assign(occlusion.uniforms, { intensity: 1.3, bias: 0.2, lengthCap: 0.3, stepSize: 1.6, frustumLength: 1500, blurStepSize: 1.2 });
   occlusion.enabled = shading;
-  camera.moveStart.addEventListener(() => { occlusion.enabled = false; });
-  camera.moveEnd.addEventListener(() => { occlusion.enabled = shading; });
+  // While the camera moves, extra detail is held back too: fewer tiles drawn, and none fetched.
+  let moving = false;
+  camera.moveStart.addEventListener(() => { moving = true; occlusion.enabled = false; });
+  camera.moveEnd.addEventListener(() => { moving = false; occlusion.enabled = shading; });
   let boost = ROOMY ? 2 : 1.5; // how much finer than the base tile error to go inside the radius
   let radius = RADIUS.initial;
   const focus = Cesium.Cartesian3.fromDegrees(139.8187, 35.7166, GROUND);
@@ -439,7 +441,8 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   const origin = Cesium.Cartesian3.fromDegrees(139.815, 35.715, GROUND);
   const frame = Cesium.Transforms.eastNorthUpToFixedFrame(origin);
   const axis = (i: number) => Cesium.Cartesian3.fromCartesian4(Cesium.Matrix4.getColumn(frame, i, new Cesium.Cartesian4()));
-  const photos: Json = await fetch("/roofs.json").then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  // The roof photos (4.6 MB) only dress the PLATEAU city, so Google's never downloads them.
+  const photos: Json = google ? null : await fetch("/roofs.json").then((r) => (r.ok ? r.json() : null)).catch(() => null);
   const photoTexture = (p?: Json) => ({
     type: Cesium.UniformType.SAMPLER_2D,
     value: new Cesium.TextureUniform({
@@ -538,7 +541,7 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
       Cesium.Cartesian3.lerp(focus, hit, 0.12, focus);
     }
     for (const t of [google, buildings] as unknown as (RadiusTileset | null)[]) if (t) { t.renderRadius = radius; t.renderFocus = focus; }
-    (active as unknown as RadiusTileset).renderBoost = boost;
+    (active as unknown as RadiusTileset).renderBoost = moving ? 1 : boost;
     const now = performance.now();
     if (now - lastStatus > 500) {
       lastStatus = now;
@@ -569,6 +572,9 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     }
   });
   const overlays = simOverlays(viewer, google ? GROUND : null);
+  // Over Google's city the PLATEAU set is drawn only when something is coloured: idle, it costs nothing.
+  const overlay = () => { if (google) buildings.show = !!(tint || matches.size || selected); };
+  overlay();
 
   let pins: Cesium.Entity[] = [];
   let orbit: Cesium.Cartesian3 | null = null;
@@ -697,6 +703,7 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     /** Colour buildings for a simulator (CSS colours by GML ID), or clear them with null. */
     colourBuildings(colours: Map<string, string> | null) {
       tint = colours;
+      overlay();
       paint++;
     },
 
@@ -750,6 +757,7 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     setMatches(ids: Set<string>, chosen: string | null) {
       matches = ids;
       selected = chosen;
+      overlay();
       paint++;
     },
 

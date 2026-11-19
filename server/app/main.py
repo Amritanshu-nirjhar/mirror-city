@@ -22,6 +22,15 @@ async def lifespan(_):
 
 app = FastAPI(title="Mirror City V1", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=10_000)  # GeoJSON layers are megabytes of coordinates
+
+
+@app.middleware("http")
+async def cache_static_answers(request, call_next):
+    """The data only changes when ingestion reruns, so Vercel's CDN can keep answers for a day."""
+    response = await call_next(request)
+    if request.method == "GET" and response.status_code == 200 and "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "public, max-age=600, s-maxage=86400, stale-while-revalidate=604800"
+    return response
 app.include_router(sims.router)  # evacuation, transit and solar simulators
 app.include_router(section.router)  # real-time section cuts
 
