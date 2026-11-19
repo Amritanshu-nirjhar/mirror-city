@@ -3,7 +3,7 @@
 // spreads, keeps its momentum, feels drag and gravity, and bounces off real building footprints.
 export interface FloodField {
   w: number; h: number; cell: number; west: number; south: number; east: number; north: number;
-  steps: number[]; scenario: string;
+  steps: number[]; scenario: string; breach: string; // GSI breach id, for the server's simulators
   arrive: Uint8Array; depthClass: Uint8Array; elev: Int8Array; building: Uint8Array;
 }
 export const NEVER = 255;

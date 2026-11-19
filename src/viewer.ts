@@ -60,6 +60,95 @@ export async function loadTerrain(url: string): Promise<Cesium.TerrainProvider> 
   }
 }
 
+export type Flow = [number, number, number, number, number, number | null];
+
+/**
+ * Simulator overlays shared by the twin and the photorealistic city: evacuation flows, one route
+ * and point markers (refuges, stops). Lines drape over whatever is drawn, terrain or 3D tiles.
+ * `ground` is the ellipsoid height to stand markers on when there is no terrain to clamp to.
+ */
+export function simOverlays(viewer: Cesium.Viewer, ground: number | null) {
+  const scene = viewer.scene;
+  let flows: Cesium.GroundPolylinePrimitive | null = null;
+  let flowCloses: (number | null)[] = [];
+  let flowTime = 0;
+  let flowShown = NaN; // the time the visible segments were last matched to
+  scene.postRender.addEventListener(() => {
+    if (!flows?.ready || flowShown === flowTime) return;
+    flowShown = flowTime;
+    flowCloses.forEach((closes, i) => {
+      flows!.getGeometryInstanceAttributes(i).show = Cesium.ShowGeometryInstanceAttribute.toValue(closes === null || closes >= flowTime);
+    });
+    scene.requestRender();
+  });
+  const route = viewer.entities.add({
+    show: false,
+    polyline: { width: 5, clampToGround: true, material: Cesium.Color.WHITE },
+  });
+  let markers: Cesium.Entity[] = [];
+  const colours = new Map<string, Cesium.Color>();
+  const colour = (css: string) => colours.get(css) ?? colours.set(css, Cesium.Color.fromCssColorString(css)).get(css)!;
+  const standing = ground === null ? Cesium.HeightReference.CLAMP_TO_GROUND : Cesium.HeightReference.NONE;
+
+  return {
+    /** Evacuation flows as [lon, lat, lon, lat, people, minute the segment closes or null]; null clears them. */
+    setFlows(segments: Flow[] | null) {
+      if (flows) scene.groundPrimitives.remove(flows);
+      flows = null;
+      flowCloses = (segments ?? []).map((s) => s[5]);
+      flowShown = NaN;
+      if (segments?.length) {
+        flows = scene.groundPrimitives.add(
+          new Cesium.GroundPolylinePrimitive({
+            geometryInstances: segments.map(
+              ([lon1, lat1, lon2, lat2, people], id) =>
+                new Cesium.GeometryInstance({
+                  id,
+                  geometry: new Cesium.GroundPolylineGeometry({
+                    positions: Cesium.Cartesian3.fromDegreesArray([lon1, lat1, lon2, lat2]),
+                    width: 1.5 + Math.sqrt(people) / 30, // thicker where more people pass
+                  }),
+                  attributes: {
+                    color: Cesium.ColorGeometryInstanceAttribute.fromColor(colour("#5eead4").withAlpha(0.9)),
+                    show: new Cesium.ShowGeometryInstanceAttribute(true),
+                  },
+                }),
+            ),
+            appearance: new Cesium.PolylineColorAppearance(),
+          }),
+        );
+      }
+      scene.requestRender();
+    },
+
+    /** Hide the flow segments that are under water at this minute of the scenario. */
+    setFlowTime(minutes: number) {
+      flowTime = minutes;
+      scene.requestRender();
+    },
+
+    setRoute(line: [number, number][] | null) {
+      route.show = !!line;
+      if (line) route.polyline!.positions = new Cesium.ConstantProperty(Cesium.Cartesian3.fromDegreesArray(line.flat()));
+      scene.requestRender();
+    },
+
+    /** Replace the point markers (refuges, stops). */
+    setMarkers(points: { lon: number; lat: number; colour: string; size?: number }[]) {
+      markers.forEach((m) => viewer.entities.remove(m));
+      markers = points.map((p) =>
+        viewer.entities.add({
+          position: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, ground === null ? 0 : ground + 3),
+          point: { pixelSize: p.size ?? 7, color: colour(p.colour), outlineColor: Cesium.Color.BLACK, outlineWidth: 1,
+                   heightReference: standing, disableDepthTestDistance: Number.POSITIVE_INFINITY },
+        }),
+      );
+      scene.requestRender();
+    },
+  };
+}
+export type SimOverlays = ReturnType<typeof simOverlays>;
+
 export async function createScene(container: HTMLElement, meta: Json, onPick: (p: Pick) => void) {
   const viewer = new Cesium.Viewer(container, {
     baseLayer: new Cesium.ImageryLayer(
@@ -144,24 +233,7 @@ export async function createScene(container: HTMLElement, meta: Json, onPick: (p
     scene.requestRender();
   };
 
-  // Simulator overlays: evacuation flows, one route, and point markers (refuges, stops).
-  let flows: Cesium.GroundPolylinePrimitive | null = null;
-  let flowCloses: (number | null)[] = [];
-  let flowTime = 0;
-  let flowShown = NaN; // the time the visible segments were last matched to
-  scene.postRender.addEventListener(() => {
-    if (!flows?.ready || flowShown === flowTime) return;
-    flowShown = flowTime;
-    flowCloses.forEach((closes, i) => {
-      flows!.getGeometryInstanceAttributes(i).show = Cesium.ShowGeometryInstanceAttribute.toValue(closes === null || closes >= flowTime);
-    });
-    scene.requestRender();
-  });
-  const route = viewer.entities.add({
-    show: false,
-    polyline: { width: 5, clampToGround: true, material: Cesium.Color.WHITE },
-  });
-  let markers: Cesium.Entity[] = [];
+  const overlays = simOverlays(viewer, null);
 
   // Start over the pilot AOI, looking north.
   const home = () =>
@@ -329,61 +401,7 @@ export async function createScene(container: HTMLElement, meta: Json, onPick: (p
       repaint();
     },
 
-    /** Evacuation flows as [lon, lat, lon, lat, people, minute the segment closes or null]; null clears them. */
-    setFlows(segments: [number, number, number, number, number, number | null][] | null) {
-      if (flows) viewer.scene.groundPrimitives.remove(flows);
-      flows = null;
-      flowCloses = (segments ?? []).map((s) => s[5]);
-      flowShown = NaN;
-      if (segments?.length) {
-        flows = viewer.scene.groundPrimitives.add(
-          new Cesium.GroundPolylinePrimitive({
-            geometryInstances: segments.map(
-              ([lon1, lat1, lon2, lat2, people], id) =>
-                new Cesium.GeometryInstance({
-                  id,
-                  geometry: new Cesium.GroundPolylineGeometry({
-                    positions: Cesium.Cartesian3.fromDegreesArray([lon1, lat1, lon2, lat2]),
-                    width: 1.5 + Math.sqrt(people) / 30, // thicker where more people pass
-                  }),
-                  attributes: {
-                    color: Cesium.ColorGeometryInstanceAttribute.fromColor(Cesium.Color.fromCssColorString("#5eead4").withAlpha(0.9)),
-                    show: new Cesium.ShowGeometryInstanceAttribute(true),
-                  },
-                }),
-            ),
-            appearance: new Cesium.PolylineColorAppearance(),
-          }),
-        );
-      }
-      scene.requestRender();
-    },
-
-    /** Hide the flow segments that are under water at this minute of the scenario. */
-    setFlowTime(minutes: number) {
-      flowTime = minutes;
-      scene.requestRender();
-    },
-
-    setRoute(line: [number, number][] | null) {
-      route.show = !!line;
-      if (line) route.polyline!.positions = new Cesium.ConstantProperty(Cesium.Cartesian3.fromDegreesArray(line.flat()));
-      scene.requestRender();
-    },
-
-    /** Replace the point markers (refuges, stops). */
-    setMarkers(points: { lon: number; lat: number; colour: string; size?: number }[]) {
-      markers.forEach((m) => viewer.entities.remove(m));
-      markers = points.map((p) =>
-        viewer.entities.add({
-          position: Cesium.Cartesian3.fromDegrees(p.lon, p.lat),
-          point: { pixelSize: p.size ?? 7, color: colour(p.colour), outlineColor: Cesium.Color.BLACK, outlineWidth: 1,
-                   heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-                   disableDepthTestDistance: Number.POSITIVE_INFINITY },
-        }),
-      );
-      scene.requestRender();
-    },
+    ...overlays,
 
     mark(point: Point | null) {
       marker.show = !!point;

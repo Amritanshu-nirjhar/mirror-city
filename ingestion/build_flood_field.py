@@ -49,7 +49,7 @@ def main():
     (PUBLIC / "flood-field.bin").write_bytes(arrive.tobytes() + depth.tobytes() + elev.tobytes() + np.asarray(img, np.uint8).tobytes())
     (PUBLIC / "flood-field.json").write_text(json.dumps({
         "w": w, "h": h, "cell": CELL, "west": WEST, "south": SOUTH, "east": EAST, "north": NORTH,
-        "steps": r["steps"].tolist(), "scenario": r["name"]}, ensure_ascii=False))
+        "steps": r["steps"].tolist(), "scenario": r["name"], "breach": BREACH}, ensure_ascii=False))
     print(f"{w}x{h}: {(arrive != NEVER).mean():.0%} floods, last step {arrive[arrive != NEVER].max()}, "
           f"ground {elev.min() / 10}..{elev.max() / 10} m, building cells {np.asarray(img).mean():.0%}")
 

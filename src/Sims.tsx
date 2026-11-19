@@ -2,8 +2,11 @@
 // rooftop solar. Each one colours the buildings, adds its map overlays, and supplies a headline
 // for the left column and a block for the building inspector.
 import { useEffect, useMemo, useState, type ReactNode, type RefObject } from "react";
-import { api, type Json, type Scenario } from "./api";
-import type { Scene } from "./viewer";
+import { api, type Json } from "./api";
+import type { SimOverlays } from "./viewer";
+
+/** What a map must offer to show the simulators: the twin and the photorealistic city both do. */
+export type SimScene = SimOverlays & { colourBuildings(colours: Map<string, string> | null): void };
 
 export type Mode = "flood" | "evacuation" | "transit" | "solar" | "section";
 export const MODES: { id: Mode; label: string }[] = [
@@ -50,10 +53,10 @@ function Legend({ items }: { items: [string, string][] }) {
   );
 }
 
-function Headline({ figure, unit, children }: { figure: string; unit?: string; children: ReactNode }) {
+function Headline({ figure, unit, children, compact }: { figure: string; unit?: string; children: ReactNode; compact: boolean }) {
   return (
     <div className="rise pointer-events-auto">
-      <div className="font-medium leading-[0.85] tracking-[-0.06em] text-[clamp(3.5rem,7vw,6rem)]">
+      <div className={`font-medium leading-[0.85] tracking-[-0.06em] ${compact ? "text-5xl" : "text-[clamp(3.5rem,7vw,6rem)]"}`}>
         {figure}
         {unit && <span className="text-[0.4em] tracking-[-0.02em] text-dim"> {unit}</span>}
       </div>
@@ -79,11 +82,9 @@ function WalkOutChart({ timeline, total, at }: { timeline: Json[]; total: number
 }
 
 export function useSim(
-  mode: Mode, scene: RefObject<Scene | null>, ready: boolean, scenario: Scenario | null,
-  minutes: number | undefined, gmlId: string | null, fail: (e: unknown) => void,
+  mode: Mode, scene: RefObject<SimScene | null>, ready: boolean, breach: string | null,
+  minutes: number | undefined, gmlId: string | null, fail: (e: unknown) => void, compact = false,
 ) {
-  // Only a GSI breach scenario with map tiles has timed, area-wide water.
-  const breach = scenario && !scenario.stages && scenario.tile_url_template ? scenario.id : null;
   const [speed, setSpeed] = useState(1);
   const [data, setData] = useState<{ key: string; d: Json } | null>(null);
   const [route, setRoute] = useState<Json>(null);
@@ -169,7 +170,7 @@ export function useSim(
       const at = d.timeline.findIndex((s: Json) => s.minutes === t);
       const now = at >= 0 ? d.timeline[at] : d.at_breach;
       headline = (
-        <Headline figure={num(now.stranded)}>
+        <Headline compact={compact} figure={num(now.stranded)}>
           <p className="mt-3 max-w-64 text-[15px] leading-snug">
             residents with no walkable way out and no floor above the water, if they have not left by {clock(t)}.
           </p>
@@ -214,7 +215,7 @@ export function useSim(
       }
       const flooded = d.stops.filter((p: Json) => p.flooded_from !== null && p.flooded_from <= t).length;
       headline = (
-        <Headline figure={num((100 * near) / d.summary.residents, 0)} unit="%">
+        <Headline compact={compact} figure={num((100 * near) / d.summary.residents, 0)} unit="%">
           <p className="mt-3 max-w-64 text-[15px] leading-snug">
             of residents live within a 5-minute walk of a bus stop or station{breach ? ` still above water at ${clock(t)}` : ""}.
           </p>
@@ -249,7 +250,7 @@ export function useSim(
     else {
       const s = d.summary;
       headline = (
-        <Headline figure={num(s.generation_gwh_year)} unit="GWh">
+        <Headline compact={compact} figure={num(s.generation_gwh_year)} unit="GWh">
           <p className="mt-3 max-w-64 text-[15px] leading-snug">a year could come from panels on half of every roof in the pilot area.</p>
           <p className="mt-1 max-w-64 text-xs tabular-nums text-dim">
             {num(s.capacity_mwp)} MW of panels on {num(s.buildings)} roofs · open sky gives {num(s.open_sky_kwh_m2)} kWh/m² a year ·

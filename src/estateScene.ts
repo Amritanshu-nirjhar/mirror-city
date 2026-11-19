@@ -2,7 +2,7 @@
 // shadows, sky and river, and slow camera moves between places.
 import * as Cesium from "cesium";
 import { api, type Json, type Point } from "./api";
-import { loadTerrain } from "./viewer";
+import { loadTerrain, simOverlays } from "./viewer";
 import { ParticleWater, peakDepth, NEVER, type FloodField } from "./floodSim";
 
 export interface Shot extends Point {
@@ -365,7 +365,7 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   const { scene, camera } = viewer;
   viewer.clock.shouldAnimate = false;
   viewer.useBrowserRecommendedResolution = false;
-  viewer.resolutionScale = Math.min(devicePixelRatio, 2);
+  viewer.resolutionScale = Math.min(devicePixelRatio, 1.5); // 2x on Retina costs ~80% more pixels per frame
   const credits = viewer.cesiumWidget.creditContainer as HTMLElement;
   if (google) {
     // Google's attribution must stay visible; the search panel covers the default corner.
@@ -397,10 +397,12 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   scene.postProcessStages.fxaa.enabled = true;
   // Google's city has its daylight baked in but no contact shading: darken creases, eaves and alleys.
   const occlusion = scene.postProcessStages.ambientOcclusion;
-  if (google && Cesium.PostProcessStageLibrary.isAmbientOcclusionSupported(scene)) {
-    occlusion.enabled = true;
-    Object.assign(occlusion.uniforms, { intensity: 1.3, bias: 0.2, lengthCap: 0.3, stepSize: 1.6, frustumLength: 1500, blurStepSize: 1.2 });
-  }
+  // It is the costliest pass, so it is drawn only while the camera rests: motion stays light.
+  let shading = !!google && Cesium.PostProcessStageLibrary.isAmbientOcclusionSupported(scene);
+  Object.assign(occlusion.uniforms, { intensity: 1.3, bias: 0.2, lengthCap: 0.3, stepSize: 1.6, frustumLength: 1500, blurStepSize: 1.2 });
+  occlusion.enabled = shading;
+  camera.moveStart.addEventListener(() => { occlusion.enabled = false; });
+  camera.moveEnd.addEventListener(() => { occlusion.enabled = shading; });
   let boost = ROOMY ? 2 : 1.5; // how much finer than the base tile error to go inside the radius
   let radius = RADIUS.initial;
   const focus = Cesium.Cartesian3.fromDegrees(139.8187, 35.7166, GROUND);
@@ -419,13 +421,14 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     shadows: Cesium.ShadowMode.ENABLED,
     ...STREAMING,
     // Over Google's city these only back the search overlay, so they stay light.
-    ...(google ? { maximumScreenSpaceError: 64, cacheBytes: 64 * 1024 * 1024, maximumCacheOverflowBytes: 32 * 1024 * 1024 }
+    ...(google ? { maximumScreenSpaceError: 64, cacheBytes: 128 * 1024 * 1024, maximumCacheOverflowBytes: 64 * 1024 * 1024 }
                : { cacheBytes: 512 * 1024 * 1024, maximumCacheOverflowBytes: 256 * 1024 * 1024 }),
   };
   let textured = true;
   let buildings: Cesium.Cesium3DTileset;
   try {
-    buildings = await Cesium.Cesium3DTileset.fromUrl(tiles.buildings, OPTIONS);
+    // Over Google's city they are only drawn as flat colour, so the far lighter untextured set is enough.
+    buildings = await Cesium.Cesium3DTileset.fromUrl(google ? tiles.plain : tiles.buildings, OPTIONS);
   } catch {
     textured = false;
     buildings = await Cesium.Cesium3DTileset.fromUrl(tiles.plain, OPTIONS);
@@ -476,6 +479,11 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     fragmentShaderText: FACADE,
   });
   if (!google) buildings.customShader = facade;
+  // Over Google's mesh the coloured PLATEAU shells would sit exactly on the photographed walls and
+  // lose the depth test, so they are inflated a little to stay in front.
+  else buildings.customShader = new Cesium.CustomShader({
+    vertexShaderText: "void vertexMain(VertexInput vsInput, inout czm_modelVertexOutput vsOutput) { vsOutput.positionMC += normalize(vsInput.attributes.normalMC) * 0.9; }",
+  });
   // The real wards around Sumida, plain and light: the skyline in wide views.
   if (!google) for (const url of tiles.context ?? [])
     Cesium.Cesium3DTileset.fromUrl(url, { maximumScreenSpaceError: 40, dynamicScreenSpaceError: true, cacheBytes: 128 * 1024 * 1024, shadows: Cesium.ShadowMode.DISABLED, skipLevelOfDetail: true })
@@ -489,10 +497,10 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     }, (e) => console.warn("scenery unavailable:", e));
   if (!google) river().then((p) => scene.groundPrimitives.add(p), (e) => console.warn("river unavailable:", e));
 
-  // Keep movement smooth: if the device can't hold about 28 frames a second, step quality down.
+  // Keep movement smooth: if the device can't hold about 40 frames a second, step quality down.
   if (!location.search.includes("quality=high")) {
     const steps = [
-      () => { occlusion.enabled = false; viewer.resolutionScale = Math.min(viewer.resolutionScale, 1.5); },
+      () => { shading = occlusion.enabled = false; scene.msaaSamples = 2; },
       () => { boost = 1; viewer.resolutionScale = Math.min(viewer.resolutionScale, 1); scene.shadowMap.size = 2048; },
       () => { viewer.resolutionScale = 0.8; scene.msaaSamples = 1; },
       () => { if (!google) { viewer.shadows = false; viewer.terrainShadows = Cesium.ShadowMode.DISABLED; } },
@@ -501,11 +509,11 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     scene.postRender.addEventListener(() => {
       frames++;
       const now = performance.now(), span = now - since;
-      if (span < 2500) return;
+      if (span < 1500) return;
       const fps = (frames * 1000) / span;
       frames = 0; since = now;
       if (document.hidden || span > 6000) return;
-      slow = fps < 28 ? slow + 1 : 0;
+      slow = fps < 40 ? slow + 1 : 0;
       if (slow >= 2 && steps.length) { steps.shift()!(); slow = 0; }
     });
   }
@@ -543,21 +551,24 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
 
   let matches = new Set<string>();
   let selected: string | null = null;
+  let tint: Map<string, string> | null = null; // a simulator's colour for each building
   let paint = 0;
   const painted = new WeakMap<object, number>();
-  const WHITE = Cesium.Color.WHITE, GOLD = Cesium.Color.fromCssColorString("#ffb24d"), PICKED = Cesium.Color.fromCssColorString("#ff6a13");
+  const made = new Map<string, Cesium.Color>();
+  const colour = (css: string, alpha = 1) => made.get(css + alpha) ?? made.set(css + alpha, Cesium.Color.fromCssColorString(css).withAlpha(alpha)).get(css + alpha)!;
   buildings.tileVisible.addEventListener((tile: Cesium.Cesium3DTile) => {
     const c = tile.content;
     if (painted.get(c) === paint) return;
     painted.set(c, paint);
     for (let i = 0; i < c.featuresLength; i++) {
-      const f = c.getFeature(i), id = f.getProperty("gml_id");
-      if (google) { // the photographic city shows through; only search results are drawn over it
-        f.show = id === selected || matches.has(id);
-        f.color = (id === selected ? PICKED : GOLD).withAlpha(id === selected ? 0.62 : 0.42);
-      } else f.color = id === selected ? PICKED : matches.has(id) ? GOLD : WHITE;
+      const f = c.getFeature(i), id = f.getProperty("gml_id"), sim = tint?.get(id);
+      if (google) { // the photographic city shows through; only search results and simulator colours are drawn over it
+        f.show = id === selected || matches.has(id) || !!sim;
+        f.color = id === selected ? colour("#ff6a13", 0.62) : matches.has(id) ? colour("#ffb24d", 0.42) : colour(sim ?? "#ffffff", 0.62);
+      } else f.color = colour(id === selected ? "#ff6a13" : matches.has(id) ? "#ffb24d" : sim ?? "#ffffff");
     }
   });
+  const overlays = simOverlays(viewer, google ? GROUND : null);
 
   let pins: Cesium.Entity[] = [];
   let orbit: Cesium.Cartesian3 | null = null;
@@ -681,6 +692,14 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   });
 
   return {
+    ...overlays,
+
+    /** Colour buildings for a simulator (CSS colours by GML ID), or clear them with null. */
+    colourBuildings(colours: Map<string, string> | null) {
+      tint = colours;
+      paint++;
+    },
+
     /** Show the flood at a fractional GSI time step, or remove it with null. */
     setFlood(field: FloodField | null, step = 0) {
       if (field && !flood) buildFlood(field);

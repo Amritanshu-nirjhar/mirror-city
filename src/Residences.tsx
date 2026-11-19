@@ -4,6 +4,7 @@ import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode 
 import type { Json } from "./api";
 import { depthAt, loadFloodField, NEVER, type FloodField } from "./floodSim";
 import { createEstate, RADIUS, type Estate, type Light, type RenderStatus, type Shot } from "./estateScene";
+import { useSim, type Mode } from "./Sims";
 
 // Assumptions behind the estimate (calibration knobs).
 const BUILD_COST = 450_000; // yen per m² of floor built
@@ -29,7 +30,10 @@ const SIGHTS: { name: string; note: string; shot: Shot }[] = [
   { name: "Asakusa skyline", note: "Across the river from Azumabashi, seen from the Sumida side.", shot: { lon: 139.7985, lat: 35.7115, z: 30, heading: 285, pitch: -9, range: 1100 } },
 ];
 const TIMES: [Light, string][] = [["morning", "Morning"], ["midday", "Midday"], ["sunset", "Sunset"]];
-const NAV = ["Home", "Gallery", "Surroundings", "Amenities", "Flood"] as const;
+const NAV = ["Home", "Gallery", "Surroundings", "Amenities", "Simulate"] as const;
+// The twin's simulators, run on this city. Evacuation and transit follow the same flood clock.
+const SIMS: [Mode, string][] = [["flood", "Flood"], ["evacuation", "Evacuation"], ["transit", "Transit"], ["solar", "Solar"]];
+const SOLAR_VIEW: Shot = { ...{ lon: 139.8187, lat: 35.7166 }, z: 0, heading: 20, pitch: -55, range: 1300 };
 const FLOOD_VIEW: Shot = { lon: 139.8135, lat: 35.7135, z: 0, heading: 35, pitch: -30, range: 1500 };
 const FLOOD_SECONDS = 45; // the first water to the last, on screen
 type Tab = (typeof NAV)[number];
@@ -83,6 +87,8 @@ export default function Residences() {
   const [field, setField] = useState<FloodField | null>(null);
   const [floodStep, setFloodStep] = useState(0);
   const [floodPlaying, setFloodPlaying] = useState(false);
+  const [simMode, setSimMode] = useState<Mode>("flood");
+  const [simError, setSimError] = useState<string | null>(null);
   const homesRef = useRef<Home[]>([]);
   const [category, setCategory] = useState("parks");
   const [minArea, setMinArea] = useState(50), [maxArea, setMaxArea] = useState(100);
@@ -136,20 +142,22 @@ export default function Residences() {
   useEffect(() => { if (ready) estate.current?.setRadius(radius); }, [ready, radius]);
   useEffect(() => { if (ready) estate.current?.showTiles(showTiles); }, [ready, showTiles]);
   const lastFloodStep = useMemo(() => (field ? field.arrive.reduce((m, a) => (a !== NEVER && a > m ? a : m), 0) + 3 : 1), [field]);
+  const simulating = tab === "Simulate";
+  const wet = simulating && simMode !== "solar"; // evacuation and transit play out over the flood
   useEffect(() => {
-    if (tab !== "Flood" || field) return;
+    if (!simulating || field) return;
     loadFloodField().then(setField, (e) => setFailed(e instanceof Error ? e.message : String(e)));
   }, [tab, field]);
-  useEffect(() => { if (ready) estate.current?.setFlood(tab === "Flood" ? field : null, floodStep); }, [ready, tab, field, floodStep]);
+  useEffect(() => { if (ready) estate.current?.setFlood(wet ? field : null, floodStep); }, [ready, wet, field, floodStep]);
   useEffect(() => {
-    if (!floodPlaying || tab !== "Flood" || !field) return;
+    if (!floodPlaying || !wet || !field) return;
     const timer = setInterval(() => setFloodStep((s) => {
       const next = s + (lastFloodStep / FLOOD_SECONDS) * 0.1;
       if (next >= lastFloodStep) setFloodPlaying(false);
       return Math.min(next, lastFloodStep);
     }), 100);
     return () => clearInterval(timer);
-  }, [floodPlaying, tab, field, lastFloodStep]);
+  }, [floodPlaying, wet, field, lastFloodStep]);
   const floodStats = useMemo(() => {
     if (!field) return null;
     let wet = 0;
@@ -159,8 +167,10 @@ export default function Residences() {
       return i >= 0 && j >= 0 && i < field.w && j < field.h && depthAt(field, i + j * field.w, floodStep) > 0;
     }).length;
     const m = field.steps[Math.min(Math.floor(floodStep), field.steps.length - 1)];
-    return { km2: (wet * field.cell * field.cell) / 1e6, reached, time: `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min` };
+    return { minutes: m, km2: (wet * field.cell * field.cell) / 1e6, reached, time: `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min` };
   }, [field, floodStep, homes]);
+  const sim = useSim(simulating ? simMode : "flood", estate, ready, field?.breach ?? null, floodStats?.minutes ?? 0, chosen,
+                     (e) => setSimError(e instanceof Error ? e.message : String(e)), true);
   useEffect(() => {
     if (ready) estate.current?.setMatches(tab === "Home" ? new Set(results.map((h) => h.id)) : new Set(), chosen);
   }, [ready, results, chosen, tab]);
@@ -188,8 +198,14 @@ export default function Residences() {
     if (t === "Home") fly(HOME, null, true);
     if (t === "Gallery") fly(GALLERY[1].shot, GALLERY[1].name);
     if (t === "Surroundings") fly(SIGHTS[0].shot, SIGHTS[0].name);
-    if (t === "Flood") { fly(FLOOD_VIEW, null); setFloodStep(0); setFloodPlaying(true); }
+    if (t === "Simulate") openSim(simMode);
     if (t === "Amenities") fly({ ...focus, z: 0, heading: 0, pitch: -58, range: 1250 }, null);
+  }
+  function openSim(m: Mode) {
+    setSimMode(m);
+    setSimError(null);
+    fly(m === "solar" ? SOLAR_VIEW : FLOOD_VIEW, null);
+    if (m !== "solar") { setFloodStep(0); setFloodPlaying(true); }
   }
   function viewHome(h: Home) {
     setChosen(h.id);
@@ -315,20 +331,40 @@ export default function Residences() {
                 <p className="mt-3 max-w-2xl text-white/75">{SIGHTS.find((s) => s.name === shot)?.note ?? "Choose a place to travel to it."}</p>
               </>
             )}
-            {tab === "Flood" && (
+            {tab === "Simulate" && (
               <>
-                <div className="flex flex-wrap items-baseline justify-between gap-x-4">
-                  <h1 className={eyebrow}>River flood simulation</h1>
-                  <p className="text-xs text-white/60">{field?.scenario ?? "Loading the scenario…"}</p>
+                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                  <h1 className={eyebrow}>Simulations</h1>
+                  <div className="flex flex-wrap gap-1.5" role="group" aria-label="Simulation">
+                    {SIMS.map(([id, label]) => <button key={id} aria-pressed={simMode === id} className={chip(simMode === id)} onClick={() => openSim(id)}>{label}</button>)}
+                  </div>
                 </div>
-                <div className="mt-3 flex items-center gap-3">
-                  <button className={chip(floodPlaying)} disabled={!field} onClick={() => { if (floodStep >= lastFloodStep) setFloodStep(0); setFloodPlaying(!floodPlaying); }}>{floodPlaying ? "Pause" : "Play"}</button>
-                  <input type="range" className="min-w-0 flex-1" aria-label="Time since the levee breach" min={0} max={lastFloodStep} step={0.05} value={floodStep}
-                         onChange={(e) => { setFloodPlaying(false); setFloodStep(Number(e.target.value)); }} />
-                  <span className="text-lg font-light tabular-nums">{floodStats?.time ?? "—"}</span>
-                </div>
-                {floodStats && <p className="mt-2 text-xs tabular-nums text-white/70">{floodStats.km2.toFixed(1)} km² under water here · {floodStats.reached.toLocaleString("en")} of {homes.length.toLocaleString("en")} apartment buildings reached</p>}
-                <p className="mt-1 text-[11px] text-white/45">Hypothetical breach: extent, timing and depth bands are GSI's published scenario. Waves and particle motion are an illustrative physics effect, sped up. Not a forecast or evacuation guidance.</p>
+                {wet && (
+                  <>
+                    <div className="mt-3 flex items-center gap-3">
+                      <button className={chip(floodPlaying)} disabled={!field} onClick={() => { if (floodStep >= lastFloodStep) setFloodStep(0); setFloodPlaying(!floodPlaying); }}>{floodPlaying ? "Pause" : "Play"}</button>
+                      <input type="range" className="min-w-0 flex-1" aria-label="Time since the levee breach" min={0} max={lastFloodStep} step={0.05} value={floodStep}
+                             onChange={(e) => { setFloodPlaying(false); setFloodStep(Number(e.target.value)); }} />
+                      <span className="text-lg font-light tabular-nums">{floodStats?.time ?? "—"}</span>
+                    </div>
+                    <p className="mt-1 text-xs text-white/60">{field?.scenario ?? "Loading the scenario…"}</p>
+                  </>
+                )}
+                {simError && <p className="mt-2 text-xs text-[#ff8a7a]">The simulation could not load: {simError}</p>}
+                {simMode === "flood" ? (
+                  <>
+                    {floodStats && <p className="mt-2 text-xs tabular-nums text-white/70">{floodStats.km2.toFixed(1)} km² under water here · {floodStats.reached.toLocaleString("en")} of {homes.length.toLocaleString("en")} apartment buildings reached</p>}
+                    <p className="mt-1 text-[11px] text-white/45">Hypothetical breach: extent, timing and depth bands are GSI's published scenario. Waves and particle motion are an illustrative physics effect, sped up. Not a forecast or evacuation guidance.</p>
+                  </>
+                ) : (
+                  <div className="mt-3 grid gap-x-8 gap-y-3 md:grid-cols-[1fr_18rem]">
+                    <div>{sim.headline}</div>
+                    <div className="text-xs">
+                      <div className={eyebrow}>Selected building</div>
+                      <div className="mt-1">{sim.inspector ?? <p className="text-white/55">Click a coloured building to see its figures.</p>}</div>
+                    </div>
+                  </div>
+                )}
               </>
             )}
             {tab === "Amenities" && (
@@ -346,7 +382,7 @@ export default function Residences() {
               </>
             )}
           </div>}
-          <div className="sticky bottom-[41px] border-t border-white/15 bg-[#14120f]/90 px-4 py-2">
+          <div className="sticky bottom-[41px] border-t border-white/15 bg-[#14120f] px-4 py-2">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
               <label className="flex min-w-56 flex-1 items-center gap-3">
                 <span className={eyebrow}>Render radius</span>
@@ -364,7 +400,7 @@ export default function Residences() {
               <p className="w-full text-[11px] text-white/45">Drag to move · right-drag to tilt and turn · scroll to zoom where you point · WASD and Q/E to fly, Shift for speed</p>
             </div>
           </div>
-          <nav className="sticky bottom-0 flex border-t border-white/15 bg-[#14120f]/80" aria-label="Sections">
+          <nav className="sticky bottom-0 flex border-t border-white/15 bg-[#14120f]" aria-label="Sections">
             {NAV.map((t) => (
               <button key={t} aria-current={tab === t ? "page" : undefined} onClick={() => openTab(t)}
                       className={`flex-1 px-1 py-3 text-[10px] font-medium uppercase tracking-[0.16em] transition-colors duration-300 sm:text-[11px] sm:tracking-[0.22em] ${tab === t ? "text-white" : "text-white/50 hover:text-white"}`}>{t}</button>

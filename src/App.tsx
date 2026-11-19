@@ -211,7 +211,7 @@ export default function App() {
     setPlaying(false);
   }
 
-  const sim = useSim(mode, scene, ready, scenario, stages ? undefined : minutes, sel?.building?.gml_id ?? null, fail);
+  const sim = useSim(mode, scene, ready, scenario && !scenario.stages && scenario.tile_url_template ? scenario.id : null, stages ? undefined : minutes, sel?.building?.gml_id ?? null, fail);
   const section = useSection(mode === "section", scene, ready, sel?.point ?? meta?.pilot, scenario, stages ? undefined : minutes,
                              sel?.building?.gml_id ?? null, (id) => select({ isBuilding: true, gmlId: id, point: null }), fail);
   const depthNow = hydro?.series?.find((p: Json) => p.minutes === minutes)?.depth_m;
