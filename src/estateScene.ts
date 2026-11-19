@@ -64,7 +64,9 @@ const STREAMING: Cesium.Cesium3DTileset.ConstructorOptions = {
   cullRequestsWhileMoving: true, dynamicScreenSpaceError: false,
   foveatedScreenSpaceError: false, // it would hold tiles back for as long as the camera drifts
 };
-type RadiusTileset = { renderRadius?: number; renderFocus?: Cesium.Cartesian3 };
+type RadiusTileset = { renderRadius?: number; renderFocus?: Cesium.Cartesian3; renderBoost?: number };
+// Devices that report plenty of memory can hold sharper tiles. Safari reports nothing: stay modest.
+const ROOMY = ((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 4) >= 8;
 // ponytail: wraps a private Cesium method (the version is pinned by package-lock). If an upgrade
 // renames it, detail stops following the radius; the blur and ring still work.
 const tileProto = Cesium.Cesium3DTile.prototype as unknown as {
@@ -74,10 +76,10 @@ if (tileProto.getScreenSpaceError && !tileProto.radiusLimited) {
   const base = tileProto.getScreenSpaceError;
   tileProto.radiusLimited = true;
   tileProto.getScreenSpaceError = function (this: { _tileset: RadiusTileset; boundingSphere: Cesium.BoundingSphere }, ...args) {
-    const error = base.apply(this, args), { renderRadius: r, renderFocus: f } = this._tileset;
+    const error = base.apply(this, args), { renderRadius: r, renderFocus: f, renderBoost: boost = 1 } = this._tileset;
     if (!r || !f) return error;
     const gap = Cesium.Cartesian3.distance(this.boundingSphere.center, f) - this.boundingSphere.radius - r;
-    return error * ringDetail(gap / r);
+    return error * (gap <= 0 ? boost : ringDetail(gap / r)); // the extra detail is spent only inside the radius
   };
 }
 const RADIUS_LENS = `
@@ -111,6 +113,17 @@ void main() {
     c = sum / 17.0;
   }
   if (d >= 0.0) {
+    // Inside the radius: recover the crispness and contrast that photogrammetry textures lose.
+    // Sharpening brightness only, and limiting it, avoids colour fringes and halos.
+    float crisp = 1.0 - amount;
+    if (crisp > 0.004) {
+      vec2 px = czm_pixelRatio / czm_viewport.zw;
+      vec3 soft = (texture(colorTexture, uv + vec2(px.x, 0.0)).rgb + texture(colorTexture, uv - vec2(px.x, 0.0)).rgb
+                 + texture(colorTexture, uv + vec2(0.0, px.y)).rgb + texture(colorTexture, uv - vec2(0.0, px.y)).rgb) * 0.25;
+      c.rgb += clamp(dot(c.rgb - soft, vec3(0.3, 0.59, 0.11)) * 0.8, -0.06, 0.06) * crisp;
+      float y = dot(c.rgb, vec3(0.3, 0.59, 0.11));
+      c.rgb = clamp(mix(c.rgb, mix(vec3(y), c.rgb, 1.08) * mix(1.0, smoothstep(-0.12, 1.08, y) / max(y, 0.02), 0.15), crisp), 0.0, 1.0);
+    }
     float grey = dot(c.rgb, vec3(0.3, 0.59, 0.11));
     c.rgb = mix(c.rgb, vec3(grey), amount * 0.18) * (1.0 - amount * 0.16);
     float width = clamp(fwidth(d) * 2.2, 1.0, u_radius * 0.02);
@@ -270,7 +283,7 @@ async function loadPhotoreal() {
   try {
     const tileset = await Cesium.createGooglePhotorealistic3DTileset({ key: key || undefined, onlyUsingWithGoogleGeocoder: true }, {
       ...STREAMING, showCreditsOnScreen: true, maximumScreenSpaceError: 16,
-      cacheBytes: 256 * 1024 * 1024, maximumCacheOverflowBytes: 128 * 1024 * 1024,
+      cacheBytes: (ROOMY ? 512 : 256) * 1024 * 1024, maximumCacheOverflowBytes: (ROOMY ? 256 : 128) * 1024 * 1024,
     });
     return { tileset, direct: !!key };
   } catch (e) {
@@ -352,7 +365,7 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   const { scene, camera } = viewer;
   viewer.clock.shouldAnimate = false;
   viewer.useBrowserRecommendedResolution = false;
-  viewer.resolutionScale = Math.min(devicePixelRatio, 1.5);
+  viewer.resolutionScale = Math.min(devicePixelRatio, 2);
   const credits = viewer.cesiumWidget.creditContainer as HTMLElement;
   if (google) {
     // Google's attribution must stay visible; the search panel covers the default corner.
@@ -382,6 +395,13 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
     scene.shadowMap.maximumDistance = 2200;
   }
   scene.postProcessStages.fxaa.enabled = true;
+  // Google's city has its daylight baked in but no contact shading: darken creases, eaves and alleys.
+  const occlusion = scene.postProcessStages.ambientOcclusion;
+  if (google && Cesium.PostProcessStageLibrary.isAmbientOcclusionSupported(scene)) {
+    occlusion.enabled = true;
+    Object.assign(occlusion.uniforms, { intensity: 1.3, bias: 0.2, lengthCap: 0.3, stepSize: 1.6, frustumLength: 1500, blurStepSize: 1.2 });
+  }
+  let boost = ROOMY ? 2 : 1.5; // how much finer than the base tile error to go inside the radius
   let radius = RADIUS.initial;
   const focus = Cesium.Cartesian3.fromDegrees(139.8187, 35.7166, GROUND);
   const focusEye = new Cesium.Cartesian3(), upEye = new Cesium.Cartesian3();
@@ -472,7 +492,8 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
   // Keep movement smooth: if the device can't hold about 28 frames a second, step quality down.
   if (!location.search.includes("quality=high")) {
     const steps = [
-      () => { viewer.resolutionScale = Math.min(viewer.resolutionScale, 1); scene.shadowMap.size = 2048; },
+      () => { occlusion.enabled = false; viewer.resolutionScale = Math.min(viewer.resolutionScale, 1.5); },
+      () => { boost = 1; viewer.resolutionScale = Math.min(viewer.resolutionScale, 1); scene.shadowMap.size = 2048; },
       () => { viewer.resolutionScale = 0.8; scene.msaaSamples = 1; },
       () => { if (!google) { viewer.shadows = false; viewer.terrainShadows = Cesium.ShadowMode.DISABLED; } },
     ];
@@ -509,6 +530,7 @@ export async function createEstate(container: HTMLElement, tiles: Json, onPick: 
       Cesium.Cartesian3.lerp(focus, hit, 0.12, focus);
     }
     for (const t of [google, buildings] as unknown as (RadiusTileset | null)[]) if (t) { t.renderRadius = radius; t.renderFocus = focus; }
+    (active as unknown as RadiusTileset).renderBoost = boost;
     const now = performance.now();
     if (now - lastStatus > 500) {
       lastStatus = now;
