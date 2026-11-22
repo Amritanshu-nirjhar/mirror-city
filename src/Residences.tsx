@@ -1,7 +1,7 @@
 // Residences: explore real Sumida as a property showcase. Buildings, land prices, amenities and
 // walking times are real; open data has no listings, so prices are labelled estimates.
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { Json } from "./api";
+import { api, type Json } from "./api";
 import { depthAt, loadFloodField, NEVER, type FloodField } from "./floodSim";
 import { createEstate, RADIUS, type Estate, type Light, type RenderStatus, type Shot } from "./estateScene";
 import { useSim, type Mode } from "./Sims";
@@ -169,6 +169,12 @@ export default function Residences() {
     const m = field.steps[Math.min(Math.floor(floodStep), field.steps.length - 1)];
     return { minutes: m, km2: (wet * field.cell * field.cell) / 1e6, reached, time: `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min` };
   }, [field, floodStep, homes]);
+  // Fetch every simulator's data as soon as the tab opens, so switching between them is instant.
+  // The arguments match useSim's requests exactly, so they share one download and one parse.
+  useEffect(() => {
+    if (!simulating || !field) return;
+    for (const p of [api(`/evacuation/${field.breach}`, { speed: 1 }), api("/transit", { breach_id: field.breach }), api("/solar")]) p.catch(() => {});
+  }, [simulating, field]);
   const sim = useSim(simulating ? simMode : "flood", estate, ready, field?.breach ?? null, floodStats?.minutes ?? 0, chosen,
                      (e) => setSimError(e instanceof Error ? e.message : String(e)), true);
   useEffect(() => {
