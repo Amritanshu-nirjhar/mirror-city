@@ -83,6 +83,7 @@ export default function Residences() {
   const [radius, setRadius] = useState(RADIUS.initial);
   const [status, setStatus] = useState<RenderStatus | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
+  const [mini, setMini] = useState(false); // dashboard tucked away for a clear view of the city
   const [showTiles, setShowTiles] = useState(false);
   const [field, setField] = useState<FloodField | null>(null);
   const [floodStep, setFloodStep] = useState(0);
@@ -227,7 +228,7 @@ export default function Residences() {
     <div className="relative h-full overflow-hidden bg-[#14120f] text-[13px] leading-5 text-white">
       <div ref={box} className="absolute inset-0" />
       <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/45 to-transparent" />
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-64 bg-gradient-to-t from-black/45 to-transparent" />
+      <div className={`pointer-events-none absolute inset-x-0 bottom-0 h-64 bg-gradient-to-t from-black/45 to-transparent transition-opacity duration-500 ${mini ? "opacity-0" : ""}`} />
 
       <div className={`absolute inset-0 z-30 grid place-items-center bg-[#14120f] px-6 text-center transition-opacity duration-[1400ms] ${ready ? "pointer-events-none opacity-0" : ""}`}>
         <div>
@@ -280,7 +281,11 @@ export default function Residences() {
         </aside>
       )}
 
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center p-3 sm:p-6">
+      {mini && (
+        <button className={`${panel} rise absolute bottom-3 left-1/2 z-10 -translate-x-1/2 px-4 py-2 text-[11px] font-medium uppercase tracking-[0.22em] hover:border-white/50 sm:bottom-6`}
+                aria-expanded={false} onClick={() => setMini(false)}>Show dashboard</button>
+      )}
+      <div className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center p-3 sm:p-6 ${mini ? "hidden" : ""}`}>
         <section className={`${panel} max-h-[52vh] w-full max-w-5xl overflow-y-auto`}>
           {panelOpen && <div key={tab} className="rise p-4">
             {tab === "Home" && (
@@ -288,6 +293,7 @@ export default function Residences() {
                 <div className="flex flex-wrap items-baseline justify-between gap-x-4">
                   <h1 className={eyebrow}>Unit search</h1>
                   <p className="text-xs tabular-nums text-white/70" aria-live="polite">{results.length.toLocaleString("en")} of {homes.length.toLocaleString("en")} real apartment buildings could fit a {size} m² home</p>
+                  <button className="text-xs text-white/70 hover:text-white" aria-expanded onClick={() => setMini(true)}>Minimize dashboard</button>
                 </div>
                 <div className={`mt-3 grid-cols-2 gap-x-5 gap-y-3 md:grid md:grid-cols-[1fr_1fr_1fr_1fr_auto_auto] ${home ? "hidden" : "grid"}`}>
                   <Num label="Min surface" unit="m²" step={5} value={minArea} set={setMinArea} />
@@ -398,6 +404,7 @@ export default function Residences() {
               </label>
               <button className="text-white/70 hover:text-white" aria-pressed={showTiles} onClick={() => setShowTiles(!showTiles)}>{showTiles ? "Hide tiles" : "Show tiles"}</button>
               <button className="text-white/70 hover:text-white" aria-expanded={panelOpen} onClick={() => setPanelOpen(!panelOpen)}>{panelOpen ? "Hide panel" : "Show panel"}</button>
+              <button className="text-white/70 hover:text-white" aria-expanded onClick={() => setMini(true)}>Minimize</button>
               <p className="w-full tabular-nums text-white/60" aria-live="off">
                 {(Math.PI * radius * radius / 1e6).toFixed(1)} km² sharp · {inRadius} apartment buildings · camera {Math.round(status?.height ?? 0).toLocaleString("en")} m ·{" "}
                 LOD 0–3: {(status?.lod ?? [0, 0, 0, 0]).join(" / ")} tiles{status?.levels && ` · HLOD levels ${status.levels[0]}–${status.levels[1]}`} ·{" "}
